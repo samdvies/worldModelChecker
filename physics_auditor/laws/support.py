@@ -3,7 +3,8 @@ from dataclasses import replace
 
 import numpy as np
 
-from physics_auditor.generator.config import ScenarioConfig
+from physics_auditor.generator.config import BodySpec, ScenarioConfig
+from physics_auditor.generator.physics import GROUND_Y
 from physics_auditor.generator.simulate import simulate
 from physics_auditor.laws.base import MinimalPair
 
@@ -21,12 +22,29 @@ class SupportLaw:
         jitters = rng.uniform(-1, 1, size=3)
         x_centres = tuple(float(WORLD_CENTRE_X + tower_offset + j) for j in jitters)
 
+        bodies = []
+        y = GROUND_Y
+        for i in range(3):
+            width, height = widths[i], heights[i]
+            y_centre = y + height / 2
+            bodies.append(
+                BodySpec(
+                    body_id=f"block{i}",
+                    shape="box",
+                    position=(x_centres[i], y_centre),
+                    mass=width * height,
+                    half_extents=(width / 2, height / 2),
+                )
+            )
+            y += height
+
         obey_config = ScenarioConfig(
             seed=seed,
+            law=self.name,
             violate=False,
-            widths=widths,
-            heights=heights,
-            x_centres=x_centres,
+            bodies=tuple(bodies),
+            intervention="ghost",
+            intervention_target="block1",
         )
         violate_config = replace(obey_config, violate=True)
 

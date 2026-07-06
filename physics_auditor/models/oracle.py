@@ -1,6 +1,7 @@
 """Oracle model adapter: a perfect physics simulator used to close the feasibility loop."""
 from physics_auditor.generator.clip import Clip
 from physics_auditor.generator.engine import Engine
+from physics_auditor.generator.state import state_distance
 
 
 class OracleAdapter:
@@ -14,11 +15,5 @@ class OracleAdapter:
         total_error = 0.0
         for actual_state in actual_window:
             predicted_state = engine.step()
-            actual_by_id = {b.body_id: b for b in actual_state.bodies}
-            for pb in predicted_state.bodies:
-                ab = actual_by_id[pb.body_id]
-                total_error += (
-                    (pb.position[0] - ab.position[0]) ** 2
-                    + (pb.position[1] - ab.position[1]) ** 2
-                ) ** 0.5
+            total_error += state_distance(predicted_state, actual_state)
         return total_error

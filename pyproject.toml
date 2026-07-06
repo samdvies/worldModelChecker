@@ -7,6 +7,8 @@ dependencies = [
     "numpy>=1.26",
     "pymunk>=6.6",
     "pillow>=10.0",
+    "torch>=2.12.1",
+    "torchvision>=0.27.1",
 ]
 
 [dependency-groups]
@@ -18,6 +20,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["physics_auditor"]
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cpu"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

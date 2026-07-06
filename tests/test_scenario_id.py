@@ -1,14 +1,16 @@
 """Characterization tests for ScenarioConfig.scenario_id."""
-from physics_auditor.generator.config import ScenarioConfig
+from physics_auditor.generator.config import BodySpec, ScenarioConfig
 
 
 def _make_config(violate: bool = False) -> ScenarioConfig:
     return ScenarioConfig(
         seed=0,
+        law="test",
         violate=violate,
-        widths=(1.0, 2.0),
-        heights=(1.0, 2.0),
-        x_centres=(0.0, 5.0),
+        bodies=(
+            BodySpec(body_id="block0", shape="box", position=(0.0, 0.0), half_extents=(0.5, 1.0), mass=1.0),
+            BodySpec(body_id="block1", shape="box", position=(5.0, 0.0), half_extents=(1.0, 2.0), mass=2.0),
+        ),
     )
 
 
