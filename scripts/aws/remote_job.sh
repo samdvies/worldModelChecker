@@ -5,6 +5,10 @@
 # job can never burn spot-instance money indefinitely.
 set -euo pipefail
 
+# user-data runs as root with no login environment: HOME may be unset, and
+# under `set -u` an unbound variable aborts WITHOUT firing the ERR trap.
+export HOME="${HOME:-/root}"
+
 # No --profile on the box itself: it authenticates via the instance profile
 # attached by launch_gpu.sh, not a named CLI profile. Region is still
 # explicit on every call.
