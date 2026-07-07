@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from physics_auditor.laws.base import MinimalPair
 from physics_auditor.models.base import ModelAdapter
-from physics_auditor.probes.behavioural.metrics import auroc
+from physics_auditor.probes.behavioural.metrics import auroc, distinct_score_count
 
 
 @dataclass
@@ -14,6 +14,7 @@ class VoEResult:
     n_pairs: int
     obey_scores: list[float]
     violate_scores: list[float]
+    distinct_scores: int
 
 
 def run_voe(
@@ -29,4 +30,5 @@ def run_voe(
         n_pairs=len(pairs),
         obey_scores=obey_scores,
         violate_scores=violate_scores,
+        distinct_scores=distinct_score_count(obey_scores, violate_scores),
     )

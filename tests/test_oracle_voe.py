@@ -38,3 +38,4 @@ def test_voe_result_fields(pairs8):
     assert len(result.violate_scores) == 8
     assert result.model == "oracle"
     assert result.law == "support"
+    assert result.distinct_scores >= 1

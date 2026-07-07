@@ -18,3 +18,18 @@ def auroc(pos: Sequence[float], neg: Sequence[float]) -> float:
             elif p == n:
                 wins += 0.5
     return wins / (len(pos) * len(neg))
+
+
+def distinct_score_count(obey: Sequence[float], violate: Sequence[float]) -> int:
+    """Number of distinct score values across BOTH the obey and violate
+    score lists combined.
+
+    An AUROC computed over n eval pairs is only as informative as its
+    effective sample size: if the scoring function collapses to a handful
+    of distinct values across many "different" seeds (e.g. a pixel-MSE
+    baseline that is translation-invariant along the only dimension the
+    generator randomises), the true effective n is much smaller than
+    len(obey) + len(violate) even though the reported AUROC uses all of
+    them. Report this alongside AUROC so degenerate cells are visible.
+    """
+    return len(set(obey) | set(violate))

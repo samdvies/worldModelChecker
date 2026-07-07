@@ -51,7 +51,12 @@ def test_circle_body_round_trips_through_from_state():
     reconstructed = Engine.from_state(state)
     rstate = reconstructed.step()
     rball = next(b for b in rstate.bodies if b.body_id == "ball")
-    assert abs(rball.position[0] - ball.position[0]) < 1e-6 or True  # sanity: no crash
+    # Stepping the original engine one further frame should match stepping
+    # a from_state-reconstructed clone by the same amount.
+    state_next = engine.step()
+    ball_next = next(b for b in state_next.bodies if b.body_id == "ball")
+    assert abs(rball.position[0] - ball_next.position[0]) < 1e-6
+    assert abs(rball.position[1] - ball_next.position[1]) < 1e-6
     assert rball.shape == "circle"
     assert rball.radius == 3.0
 
