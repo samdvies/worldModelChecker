@@ -5,13 +5,13 @@
 # Usage: scripts/aws/pull_results.sh
 set -euo pipefail
 
-PROFILE="claude-admin"
-REGION="eu-west-1"
-ACCOUNT_ID="652742769396"
-BUCKET="physics-auditor-${ACCOUNT_ID}"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=./_env.sh
+source "$SCRIPT_DIR/_env.sh"
+
+ACCOUNT_ID="$(resolve_account_id)"
+BUCKET="physics-auditor-${ACCOUNT_ID}"
 DEST_DIR="$(mktemp -d)"
 
 echo "== syncing results from s3://${BUCKET}/results/ =="

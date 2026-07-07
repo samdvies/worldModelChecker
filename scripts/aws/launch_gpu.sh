@@ -3,10 +3,15 @@
 # pretrained-encoder (DINOv2 / V-JEPA-2) latent caches. Run FROM the laptop.
 #
 # Usage:
-#   scripts/aws/launch_gpu.sh [--on-demand] [--dry-run]
+#   scripts/aws/launch_gpu.sh [--on-demand] [--dry-run] [--preflight]
 #
 # --dry-run prints every AWS CLI call instead of executing it, but still
 # runs `aws sts get-caller-identity` for real as a credential sanity check.
+#
+# --preflight cheaply verifies every resolvable external identifier (AMI
+# filter returns an id, bucket is reachable, instance type is offered in
+# region) and EXITS before any bucket/IAM/instance creation -- no state is
+# created or mutated. Run this before every real launch (see runbook.md).
 #
 # The box gets a public IP (needed for internet egress in the default VPC,
 # which has no NAT gateway), but isolation comes from a zero-inbound-rule
@@ -15,29 +20,22 @@
 # inside it) on completion or failure.
 set -euo pipefail
 
-PROFILE="claude-admin"
-REGION="eu-west-1"
-ACCOUNT_ID="652742769396"
-BUCKET="physics-auditor-${ACCOUNT_ID}"
-PROJECT_TAG="physics-auditor"
-INSTANCE_TYPE="g4dn.xlarge"
-ROOT_VOLUME_GB=100
-IAM_ROLE_NAME="physics-auditor-gpu-role"
-IAM_PROFILE_NAME="physics-auditor-gpu-profile"
-SG_NAME="physics-auditor-gpu-sg"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=./_env.sh
+source "$SCRIPT_DIR/_env.sh"
 
 ON_DEMAND=false
 DRY_RUN=false
+PREFLIGHT=false
 for arg in "$@"; do
     case "$arg" in
         --on-demand) ON_DEMAND=true ;;
         --dry-run) DRY_RUN=true ;;
+        --preflight) PREFLIGHT=true ;;
         *) echo "unknown arg: $arg" >&2; exit 1 ;;
     esac
 done
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # aws_cmd: in --dry-run mode, print the command instead of running it.
 aws_cmd() {
@@ -50,8 +48,49 @@ aws_cmd() {
     fi
 }
 
-echo "== credential check (real, even in --dry-run) =="
+echo "== credential check (real, even in --dry-run / --preflight) =="
 aws sts get-caller-identity --profile "$PROFILE" --region "$REGION"
+
+ACCOUNT_ID="$(resolve_account_id)"
+BUCKET="physics-auditor-${ACCOUNT_ID}"
+echo "resolved ACCOUNT_ID=$ACCOUNT_ID BUCKET=$BUCKET (never hardcoded -- class D guard)"
+
+if [ "$PREFLIGHT" = true ]; then
+    echo "== --preflight: cheaply verifying external identifiers, no resources created =="
+
+    echo "-- AMI filter resolves to a real image id --"
+    PREFLIGHT_AMI_ID=$(aws ec2 describe-images --owners amazon \
+        --filters "Name=name,Values=Deep Learning OSS Nvidia Driver AMI GPU PyTorch*Ubuntu 22.04*" \
+        --query "sort_by(Images,&CreationDate)[-1].ImageId" --output text \
+        --profile "$PROFILE" --region "$REGION")
+    if [ -z "$PREFLIGHT_AMI_ID" ] || [ "$PREFLIGHT_AMI_ID" = "None" ]; then
+        echo "FAILED: no Deep Learning AMI matched in $REGION" >&2
+        exit 1
+    fi
+    echo "   AMI: $PREFLIGHT_AMI_ID"
+
+    echo "-- instance type $INSTANCE_TYPE is offered in $REGION --"
+    OFFERED=$(aws ec2 describe-instance-type-offerings \
+        --location-type region \
+        --filters "Name=instance-type,Values=${INSTANCE_TYPE}" \
+        --query "InstanceTypeOfferings[0].InstanceType" --output text \
+        --profile "$PROFILE" --region "$REGION")
+    if [ -z "$OFFERED" ] || [ "$OFFERED" = "None" ]; then
+        echo "FAILED: $INSTANCE_TYPE is not offered in $REGION" >&2
+        exit 1
+    fi
+    echo "   offered: $OFFERED"
+
+    echo "-- bucket $BUCKET is reachable (or absent, which is fine -- create-bucket is idempotent) --"
+    if aws s3api head-bucket --bucket "$BUCKET" --profile "$PROFILE" --region "$REGION" 2>/dev/null; then
+        echo "   bucket exists and is reachable"
+    else
+        echo "   bucket does not exist yet -- will be created on real launch"
+    fi
+
+    echo "== --preflight: all checks passed, no resources created =="
+    exit 0
+fi
 
 echo "== 1. tar repo (git archive HEAD) =="
 ARCHIVE="$(mktemp -d)/physics-auditor.tar.gz"
@@ -141,6 +180,11 @@ echo "== 6. build user-data (downloads + runs remote_job.sh from S3) =="
 USER_DATA=$(cat <<EOF
 #!/bin/bash
 set -e
+# class C guard: if the remote_job.sh download/chmod/invocation below fails
+# BEFORE remote_job.sh's own ERR trap is reached, this is the only
+# diagnostic that will ever reach S3 -- without it, a download/permissions
+# failure here was previously silent (no log, no shutdown).
+trap 'aws s3 cp /var/log/cloud-init-output.log s3://${BUCKET}/results/userdata-failure.log --region ${REGION} || true' ERR
 mkdir -p /opt/physics-auditor
 aws s3 cp "s3://${BUCKET}/scripts/remote_job.sh" /opt/physics-auditor/remote_job.sh --region ${REGION}
 chmod +x /opt/physics-auditor/remote_job.sh

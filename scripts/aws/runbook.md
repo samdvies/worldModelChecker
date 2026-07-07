@@ -14,6 +14,34 @@ itself. Run every step below **from the laptop** unless marked otherwise.
 - Hard backstop: `remote_job.sh` schedules `sudo shutdown -h +240` (4h) at
   the very start, so a wedged job cannot run away with cost.
 
+## Mandatory pre-launch sequence (do all three, in order, every time)
+
+These are cheap (seconds to a few minutes) and exist specifically to avoid
+paying for a ~10-minute box boot only to hit something a local check could
+have caught (see `docs/failure-sweeps.md` for the incidents that motivated
+each one):
+
+1. **Full local suite green:**
+   ```
+   uv run pytest -q
+   ```
+2. **Fresh-clone smoke gate** (class E: catches tests that quietly depend on
+   untracked local state like `artifacts/`/`cache/` -- simulates a clean
+   checkout via `git archive HEAD` into a scratch dir and runs the smoke
+   tier there; commit any new test files first, since `git archive` only
+   sees committed content):
+   ```
+   uv run python scripts/fresh_clone_smoke.py
+   ```
+3. **launch_gpu.sh preflight** (class D: cheaply verifies AMI resolution,
+   instance-type region-offering, and bucket reachability WITHOUT creating
+   any resources):
+   ```
+   scripts/aws/launch_gpu.sh --preflight
+   ```
+
+Only proceed to the steps below once all three pass.
+
 ## Order of operations
 
 1. **Dry run first, always.** Confirms credentials and prints every AWS CLI
@@ -43,7 +71,8 @@ itself. Run every step below **from the laptop** unless marked otherwise.
    tail -f /opt/physics-auditor/remote_job.log
    ```
    The log should show, **in this order**: repo download, `uv sync --group
-   gpu`, `pytest -q` (job aborts here if red), the DINOv2 smoke test, the
+   gpu`, `pytest -m smoke` (fast fail in seconds if the wiring broke),
+   `pytest -q` (job aborts here if red), the DINOv2 smoke test, the
    V-JEPA-2 smoke test, then cache population for train/val/eval/probe clip
    sets. Every step is timestamped with elapsed seconds so you can sanity
    check the cost as it runs.
@@ -87,3 +116,18 @@ itself. Run every step below **from the laptop** unless marked otherwise.
   `VJEPA2Encoder.load()` only run on the GPU box, inside `remote_job.sh`.
 - IAM role/instance-profile/S3-bucket creation in `launch_gpu.sh` is
   idempotent -- safe to rerun `launch_gpu.sh` for subsequent jobs.
+- `PROFILE`/`REGION`/`INSTANCE_TYPE`/IAM/SG names live in one place,
+  `scripts/aws/_env.sh`, sourced by both `launch_gpu.sh` and
+  `pull_results.sh`. `ACCOUNT_ID` is never hardcoded -- both scripts derive
+  it live via `aws sts get-caller-identity` so they can never silently
+  drift onto different buckets (class D, see `docs/failure-sweeps.md`).
+- **`docs/gallery/index.html` changes need a live browser pass, not just a
+  static check.** Ordering/hoisting bugs in the page's JS (class F) do not
+  reliably surface via `node --check`, a text read, or even repeated static
+  review -- only live execution caught the one instance of this hit so far,
+  and it needed multiple page loads (cold + warm cache) to reproduce. After
+  any edit to `docs/gallery/index.html`, load it in Chrome (e.g. via the
+  claude-in-chrome tooling) a few times and check the console for errors
+  before treating the change as done. `tests/test_gallery_js_ordering.py`
+  pins the specific known-bad ordering pattern but is not a substitute for
+  this.

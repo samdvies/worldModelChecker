@@ -13,7 +13,6 @@ export HOME="${HOME:-/root}"
 # attached by launch_gpu.sh, not a named CLI profile. Region is still
 # explicit on every call.
 REGION="${REGION:-eu-west-1}"
-BUCKET="${BUCKET:?BUCKET env var must be set (passed by launch_gpu.sh user-data)}"
 
 WORKDIR="/opt/physics-auditor"
 REPO_DIR="$WORKDIR/repo"
@@ -21,11 +20,17 @@ LOG_FILE="$WORKDIR/remote_job.log"
 mkdir -p "$WORKDIR" "$REPO_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+# IMPORTANT (class C, see docs/failure-sweeps.md): the ERR trap and the cost
+# backstop MUST be set up before ANY command that can fail -- including
+# `${BUCKET:?...}` below. Parameter-expansion failures like `:?` abort a
+# `set -u` script WITHOUT firing the ERR trap, so if BUCKET is unset/empty
+# and this check ran before the trap/backstop existed, the instance would
+# keep running with no automatic shutdown and no log ever reaching S3.
 echo "== cost backstop: hard shutdown scheduled at +240 min regardless of outcome =="
 sudo shutdown -h +240 || true
 
 upload_log() {
-    aws s3 cp "$LOG_FILE" "s3://${BUCKET}/results/remote_job.log" --region "$REGION" || true
+    aws s3 cp "$LOG_FILE" "s3://${BUCKET:-unknown-bucket}/results/remote_job.log" --region "$REGION" || true
 }
 
 on_error() {
@@ -36,6 +41,16 @@ on_error() {
     exit "$exit_code"
 }
 trap on_error ERR
+
+# BUCKET has no safe default (it names the S3 bucket everything is
+# read/written from), so an unset/empty value is a hard failure -- but as a
+# NORMAL command (`if`/`echo`/`exit`), not a `${VAR:?}` parameter-expansion
+# abort, so it triggers the ERR trap above like any other failure instead of
+# bypassing it.
+if [ -z "${BUCKET:-}" ]; then
+    echo "== FAILED: BUCKET env var must be set (passed by launch_gpu.sh user-data) =="
+    false
+fi
 
 t0=$(date +%s)
 log_elapsed() { echo "[+$(( $(date +%s) - t0 ))s] $*"; }
@@ -51,6 +66,12 @@ export PATH="$HOME/.local/bin:$PATH"
 
 log_elapsed "== uv sync --group gpu =="
 uv sync --group gpu
+
+log_elapsed "== pytest -m smoke (fast torch-free pre-flight -- fail fast in seconds, not minutes) =="
+uv run pytest -m smoke -q tests/test_smoke.py
+
+log_elapsed "== pytest -m smoke_torch (torch-backed pre-flight, mock-injected models only) =="
+uv run pytest -m smoke_torch -q tests/test_smoke_torch.py
 
 log_elapsed "== pytest -q (fail-fast: red tests abort the job) =="
 uv run pytest -q

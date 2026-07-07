@@ -516,7 +516,6 @@
         })(i);
       }
     }
-    loadImages();
 
     function sizeCanvas(canvas, img) {
       if (canvas.width !== img.naturalWidth && img.naturalWidth) {
@@ -592,8 +591,15 @@
       requestAnimationFrame(tick);
     }
 
-    // trace chart
+    // trace chart -- MUST run before loadImages(): drawTraceChart() is what
+    // populates playheadRegistry[lawName] and creates the playhead-<law>
+    // DOM element that updatePlayhead() reads. Image.onload can fire
+    // SYNCHRONOUSLY on a cache-warm decode (loadImages -> drawFrame(0) ->
+    // updatePlayhead), so if that happened before this line ran,
+    // updatePlayhead would read an undefined registry entry (class F bug,
+    // see docs/failure-sweeps.md).
     drawTraceChart(lawName, law, ui.svg);
+    loadImages();
     setFrame(0);
   }
 

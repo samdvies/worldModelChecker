@@ -27,3 +27,7 @@ url = "https://download.pytorch.org/whl/cpu"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "smoke: fast (<=10s total) TORCH-FREE pre-flight tier -- import + wiring checks, run before every remote GPU-box dispatch (see scripts/aws/runbook.md)",
+    "smoke_torch: torch-backed pre-flight tier (mock-injected models only) -- run right after `smoke`, not held to the <=10s bar (torch import alone costs ~15s cold in this environment; see docs/failure-sweeps.md)",
+]
