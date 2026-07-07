@@ -107,6 +107,16 @@ def main() -> int:
                 shutil.rmtree(stale_path)
 
         print(f"== running 'uv run pytest -m smoke' in the fresh export =={extract_dir}")
+        # Warm the environment UNTIMED: in a fresh export `uv run` first
+        # resolves and installs the whole venv (torch ~2 min), which is
+        # environment-setup cost, not smoke-tier cost. Timing it against the
+        # 10s budget made the gate fail unconditionally on every fresh clone.
+        print("== warming fresh venv (untimed): uv sync ==")
+        sync = subprocess.run(["uv", "sync"], cwd=extract_dir)
+        if sync.returncode != 0:
+            print("== fresh-clone smoke gate: FAIL -- uv sync failed ==", file=sys.stderr)
+            return sync.returncode
+
         t0 = time.monotonic()
         result = subprocess.run(
             ["uv", "run", "pytest", "-m", "smoke", "-q", "tests/test_smoke.py"],
