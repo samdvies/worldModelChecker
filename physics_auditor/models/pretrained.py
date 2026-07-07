@@ -128,10 +128,14 @@ class VJEPA2Encoder:
         pixel_values: (1, T, 3, 256, 256) -> (num_temporal, num_spatial,
         hidden_dim). Isolated on purpose (see module docstring)."""
         with torch.no_grad():
-            out = self.model(pixel_values=pixel_values)
+            out = self.model(pixel_values_videos=pixel_values)
         hidden = out.last_hidden_state[0]  # (num_temporal*num_spatial, hidden_dim)
         num_temporal = max(pixel_values.shape[1] // self.TUBELET_SIZE, 1)
         num_spatial = hidden.shape[0] // num_temporal
+        assert hidden.shape[0] % num_temporal == 0, (
+            f"hidden tokens {hidden.shape[0]} not evenly divisible by "
+            f"num_temporal {num_temporal}"
+        )
         return hidden[: num_temporal * num_spatial].view(num_temporal, num_spatial, -1)
 
     def encode(self, clip: Clip) -> np.ndarray:

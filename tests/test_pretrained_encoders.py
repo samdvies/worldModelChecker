@@ -144,10 +144,10 @@ class _MockVJEPA(nn.Module):
         self.num_spatial = num_spatial
         self.proj = nn.Linear(3, hidden_dim)
 
-    def forward(self, pixel_values: torch.Tensor):
-        b, t, c, h, w = pixel_values.shape
+    def forward(self, pixel_values_videos: torch.Tensor, **kwargs):
+        b, t, c, h, w = pixel_values_videos.shape
         num_temporal = max(t // 2, 1)
-        pooled = pixel_values.mean(dim=[3, 4])[0]  # (t, 3)
+        pooled = pixel_values_videos.mean(dim=[3, 4])[0]  # (t, 3)
         # one token vector per (temporal, spatial) slot, spatial-invariant
         # within a temporal slot for a solid-colour clip so we can predict it
         temporal_pooled = pooled[: num_temporal * 2 : 2]  # (num_temporal, 3)
@@ -259,10 +259,10 @@ class _MockVJEPASpatialVarying(nn.Module):
         self.num_spatial = num_spatial
         self.proj = nn.Linear(3, hidden_dim)
 
-    def forward(self, pixel_values: torch.Tensor):
-        b, t, c, h, w = pixel_values.shape
+    def forward(self, pixel_values_videos: torch.Tensor, **kwargs):
+        b, t, c, h, w = pixel_values_videos.shape
         num_temporal = max(t // 2, 1)
-        pooled = pixel_values.mean(dim=[3, 4])[0]  # (t, 3)
+        pooled = pixel_values_videos.mean(dim=[3, 4])[0]  # (t, 3)
         temporal_pooled = pooled[: num_temporal * 2 : 2]  # (num_temporal, 3)
         base = self.proj(temporal_pooled)  # (num_temporal, hidden_dim)
         offsets = torch.arange(self.num_spatial, dtype=base.dtype).view(-1, 1, 1)  # (S,1,1)
