@@ -299,6 +299,12 @@
   };
   var STACK_ORDER = ["oracle", "pixel-static", "pixel-linear"].concat(DATA.stack_names);
 
+  // chart constants -- must be initialised BEFORE the law-section build loop
+  // below runs drawTraceChart (var hoists the name, not the value).
+  var PADDING = { left: 40, right: 10, top: 10, bottom: 24 };
+  var CHART_W = 1000, CHART_H = 220;
+  var playheadRegistry = {}; // lawName -> {xFor, top, bottom}
+
   function el(tag, attrs, children) {
     var e = document.createElement(tag);
     attrs = attrs || {};
@@ -592,10 +598,6 @@
   }
 
   // ---- trace chart (SVG) ----
-  var PADDING = { left: 40, right: 10, top: 10, bottom: 24 };
-  var CHART_W = 1000, CHART_H = 220;
-  var playheadRegistry = {}; // lawName -> {line, svg, nFrames}
-
   function drawTraceChart(lawName, law, svg) {
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     var nFrames = law.n_frames;
