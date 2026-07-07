@@ -8,6 +8,7 @@ where pixel_floor(law) = max(auroc(pixel-static), auroc(pixel-linear)).
 
 Usage: uv run python scripts/run_report_card.py
 """
+import argparse
 import json
 import time
 from pathlib import Path
@@ -20,6 +21,7 @@ from physics_auditor.models.cache import encode_clip_cached
 from physics_auditor.models.encoders import RawPixelEncoder, TinyCNNAE, TinyCNNPred
 from physics_auditor.models.oracle import OracleAdapter
 from physics_auditor.models.predictor import load_predictor, load_predictor_meta
+from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder
 from physics_auditor.models.stacks import LatentStackAdapter
 from physics_auditor.probes.behavioural.pixel_baseline import PixelLinearAdapter, PixelStaticAdapter
 from physics_auditor.probes.behavioural.voe import run_voe
@@ -35,8 +37,13 @@ PREDICTOR_WEIGHTS = {
     "raw-pixel": WEIGHTS_DIR / "predictor_raw-pixel.pt",
     "tiny-cnn-ae": WEIGHTS_DIR / "predictor_tiny-cnn-ae.pt",
     "tiny-cnn-pred": WEIGHTS_DIR / "predictor_tiny-cnn-pred.pt",
+    "dinov2-s14": WEIGHTS_DIR / "predictor_dinov2-s14.pt",
+    "vjepa2-vitl": WEIGHTS_DIR / "predictor_vjepa2-vitl.pt",
 }
-LATENT_STACKS = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
+DEFAULT_STACKS = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
+PRETRAINED_STACKS = ["dinov2-s14", "vjepa2-vitl"]
+ALL_STACK_NAMES = DEFAULT_STACKS + PRETRAINED_STACKS
+LATENT_STACKS = DEFAULT_STACKS  # default kept for backward-compat callers
 
 
 def _load_encoder(name: str):
@@ -52,15 +59,19 @@ def _load_encoder(name: str):
         enc.model.load_state_dict(torch.load(PRED_WEIGHTS, map_location="cpu"))
         enc.model.eval()
         return enc
+    if name == "dinov2-s14":
+        return DINOv2Encoder().load()
+    if name == "vjepa2-vitl":
+        return VJEPA2Encoder().load()
     raise ValueError(f"unknown stack {name}")
 
 
-def build_adapters() -> list:
-    """Builds all 6 model adapters (oracle, 2 pixel baselines, 3 latent
-    stacks with frozen encoder + trained predictor loaded from disk)."""
+def build_adapters(stacks: list[str] = DEFAULT_STACKS) -> list:
+    """Builds oracle + 2 pixel baselines + one LatentStackAdapter (frozen
+    encoder + trained predictor loaded from disk) per requested stack name."""
     adapters: list = [OracleAdapter(), PixelStaticAdapter(), PixelLinearAdapter()]
 
-    for name in LATENT_STACKS:
+    for name in stacks:
         encoder = _load_encoder(name)
         # Predictor input is k*dim wide (net.0.weight); dividing out k=4 avoids
         # an extra (expensive) encode() call just to learn the latent dim.
@@ -85,7 +96,19 @@ def build_adapters() -> list:
 
 
 def main() -> None:
-    adapters = build_adapters()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--stacks", type=str, default=None,
+        help=f"comma list of latent stacks to score, from {ALL_STACK_NAMES}. "
+             f"Default: {DEFAULT_STACKS} (unchanged legacy behaviour).",
+    )
+    args = parser.parse_args()
+    stacks = [s.strip() for s in args.stacks.split(",")] if args.stacks else DEFAULT_STACKS
+    unknown = set(stacks) - set(ALL_STACK_NAMES)
+    if unknown:
+        raise ValueError(f"unknown stack(s) {sorted(unknown)}, choose from {ALL_STACK_NAMES}")
+
+    adapters = build_adapters(stacks)
     card = ReportCard()
     voe_scores: dict = {}
     timings: dict[str, float] = {}
@@ -121,7 +144,7 @@ def main() -> None:
                       f"smaller than n_pairs suggests.")
 
         pixel_floor = max(auroc_by_model["pixel-static"], auroc_by_model["pixel-linear"])
-        for name in LATENT_STACKS:
+        for name in stacks:
             law_scores[name]["delta_vs_pixel_floor"] = auroc_by_model[name] - pixel_floor
         law_scores["pixel_floor"] = pixel_floor
 
@@ -136,7 +159,7 @@ def main() -> None:
     md_lines.append("| --- | --- | --- | --- | --- |")
     for law_name in ALL_LAWS:
         pf = voe_scores[law_name]["pixel_floor"]
-        for name in LATENT_STACKS:
+        for name in stacks:
             entry = voe_scores[law_name][name]
             md_lines.append(
                 f"| {law_name} | {name} | {entry['auroc']:.3f} | {pf:.3f} | {entry['delta_vs_pixel_floor']:+.3f} |"

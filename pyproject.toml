@@ -13,6 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
+gpu = ["transformers>=4.45", "accelerate>=0.34"]
 
 [build-system]
 requires = ["hatchling"]

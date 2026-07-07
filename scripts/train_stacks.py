@@ -31,6 +31,7 @@ from physics_auditor.models.predictor import (
     load_predictor,
     save_predictor,
 )
+from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder
 
 ROOT = Path(__file__).resolve().parent.parent
 WEIGHTS_DIR = ROOT / "artifacts" / "weights"
@@ -42,7 +43,25 @@ PREDICTOR_WEIGHTS = {
     "raw-pixel": WEIGHTS_DIR / "predictor_raw-pixel.pt",
     "tiny-cnn-ae": WEIGHTS_DIR / "predictor_tiny-cnn-ae.pt",
     "tiny-cnn-pred": WEIGHTS_DIR / "predictor_tiny-cnn-pred.pt",
+    "dinov2-s14": WEIGHTS_DIR / "predictor_dinov2-s14.pt",
+    "vjepa2-vitl": WEIGHTS_DIR / "predictor_vjepa2-vitl.pt",
 }
+# The 3 from-scratch stacks are trained/populated by default (unchanged
+# behaviour); the 2 pretrained stacks are opt-in via --stacks since their
+# real weights only load on the GPU box (see models/pretrained.py).
+DEFAULT_STACKS = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
+PRETRAINED_STACKS = ["dinov2-s14", "vjepa2-vitl"]
+ALL_STACK_NAMES = DEFAULT_STACKS + PRETRAINED_STACKS
+
+
+def _load_pretrained_encoder(name: str):
+    """Loads a pretrained stack's REAL weights via its lazy .load() -- only
+    safe to call on a machine with network access (GPU box)."""
+    if name == "dinov2-s14":
+        return DINOv2Encoder().load()
+    if name == "vjepa2-vitl":
+        return VJEPA2Encoder().load()
+    raise ValueError(f"unknown pretrained stack {name}")
 
 
 def _all_frames(clips: list[Clip]) -> np.ndarray:
@@ -187,31 +206,56 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--force", action="store_true", help="retrain even if weights already exist")
     parser.add_argument("--predictors", action="store_true", help="also train a LatentPredictor per stack")
+    parser.add_argument(
+        "--stacks", type=str, default=None,
+        help=f"comma list of stacks to build, from {ALL_STACK_NAMES}. "
+             f"Default: {DEFAULT_STACKS} (unchanged legacy behaviour). "
+             f"Pass e.g. 'dinov2-s14,vjepa2-vitl' to add the pretrained "
+             f"stacks WITHOUT retraining/recomputing the existing three.",
+    )
     args = parser.parse_args()
+    requested = [s.strip() for s in args.stacks.split(",")] if args.stacks else DEFAULT_STACKS
+    unknown = set(requested) - set(ALL_STACK_NAMES)
+    if unknown:
+        raise ValueError(f"unknown stack(s) {sorted(unknown)}, choose from {ALL_STACK_NAMES}")
 
     print("Building lawful train clips (seeds 100-132, all 4 laws)...")
     train = list(train_clips())
     print(f"  {len(train)} clips, {sum(c.frames.shape[0] for c in train)} frames")
 
-    print("\nTraining TinyCNNAE (reconstructive)...")
-    ae, ae_losses, ae_time = load_or_train_ae(train, force=args.force)
-    if ae_losses is None:
-        print(f"  weights already present at {AE_WEIGHTS}, skipped (use --force to retrain)")
-    else:
-        print(f"  epoch losses: {[f'{l:.5f}' for l in ae_losses]}  ({ae_time:.1f}s)")
-    print(f"  cache_key: {ae.cache_key}")
+    stacks = []
 
-    print("\nTraining TinyCNNPred (predictive)...")
-    pred, pred_losses, pred_time = load_or_train_pred(train, force=args.force)
-    if pred_losses is None:
-        print(f"  weights already present at {PRED_WEIGHTS}, skipped (use --force to retrain)")
-    else:
-        print(f"  epoch losses: {[f'{l:.5f}' for l in pred_losses]}  ({pred_time:.1f}s)")
-    print(f"  cache_key: {pred.cache_key}")
+    if "raw-pixel" in requested:
+        stacks.append(RawPixelEncoder())
 
-    stacks = [RawPixelEncoder(), ae, pred]
+    if "tiny-cnn-ae" in requested:
+        print("\nTraining TinyCNNAE (reconstructive)...")
+        ae, ae_losses, ae_time = load_or_train_ae(train, force=args.force)
+        if ae_losses is None:
+            print(f"  weights already present at {AE_WEIGHTS}, skipped (use --force to retrain)")
+        else:
+            print(f"  epoch losses: {[f'{l:.5f}' for l in ae_losses]}  ({ae_time:.1f}s)")
+        print(f"  cache_key: {ae.cache_key}")
+        stacks.append(ae)
 
-    print("\nPopulating latent caches (train + val + eval clips x 3 stacks)...")
+    if "tiny-cnn-pred" in requested:
+        print("\nTraining TinyCNNPred (predictive)...")
+        pred, pred_losses, pred_time = load_or_train_pred(train, force=args.force)
+        if pred_losses is None:
+            print(f"  weights already present at {PRED_WEIGHTS}, skipped (use --force to retrain)")
+        else:
+            print(f"  epoch losses: {[f'{l:.5f}' for l in pred_losses]}  ({pred_time:.1f}s)")
+        print(f"  cache_key: {pred.cache_key}")
+        stacks.append(pred)
+
+    for name in PRETRAINED_STACKS:
+        if name in requested:
+            print(f"\nLoading pretrained {name} (real weights, GPU box only)...")
+            enc = _load_pretrained_encoder(name)
+            print(f"  cache_key: {enc.cache_key}")
+            stacks.append(enc)
+
+    print(f"\nPopulating latent caches (train + val + eval clips x {len(stacks)} stack(s))...")
     t0 = time.time()
     counts = populate_caches(stacks)
     print(f"  done in {time.time() - t0:.1f}s")

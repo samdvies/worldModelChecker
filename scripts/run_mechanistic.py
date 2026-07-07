@@ -8,6 +8,7 @@ everything into artifacts/report_card_v2.md + artifacts/mechanistic_scores.json.
 
 Usage: uv run python scripts/run_mechanistic.py
 """
+import argparse
 import json
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ import torch
 from physics_auditor.laws import ALL_LAWS
 from physics_auditor.models.encoders import RawPixelEncoder, TinyCNNAE, TinyCNNPred
 from physics_auditor.models.predictor import load_predictor
+from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder
 from physics_auditor.probes.mechanistic.decodability import PRIMARY_VARIABLE, decode_law_stack
 from physics_auditor.probes.mechanistic.intervention import run_intervention_law_stack
 from physics_auditor.report.verdict import is_decodable, is_voe_sensitive, verdict
@@ -32,8 +34,13 @@ PREDICTOR_WEIGHTS = {
     "raw-pixel": WEIGHTS_DIR / "predictor_raw-pixel.pt",
     "tiny-cnn-ae": WEIGHTS_DIR / "predictor_tiny-cnn-ae.pt",
     "tiny-cnn-pred": WEIGHTS_DIR / "predictor_tiny-cnn-pred.pt",
+    "dinov2-s14": WEIGHTS_DIR / "predictor_dinov2-s14.pt",
+    "vjepa2-vitl": WEIGHTS_DIR / "predictor_vjepa2-vitl.pt",
 }
-STACK_NAMES = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
+DEFAULT_STACKS = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
+PRETRAINED_STACKS = ["dinov2-s14", "vjepa2-vitl"]
+ALL_STACK_NAMES = DEFAULT_STACKS + PRETRAINED_STACKS
+STACK_NAMES = DEFAULT_STACKS  # default kept for backward-compat callers
 
 
 def _load_encoder(name: str):
@@ -49,6 +56,10 @@ def _load_encoder(name: str):
         enc.model.load_state_dict(torch.load(PRED_WEIGHTS, map_location="cpu"))
         enc.model.eval()
         return enc
+    if name == "dinov2-s14":
+        return DINOv2Encoder().load()
+    if name == "vjepa2-vitl":
+        return VJEPA2Encoder().load()
     raise ValueError(f"unknown stack {name}")
 
 
@@ -59,6 +70,20 @@ def _load_predictor_for(name: str, encoder):
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--stacks", type=str, default=None,
+        help=f"comma list of latent stacks to run mechanistic probes on, from "
+             f"{ALL_STACK_NAMES}. Default: {DEFAULT_STACKS} (unchanged legacy "
+             f"behaviour). voe_scores.json (from run_report_card.py) must "
+             f"already contain an entry for every requested stack.",
+    )
+    args = parser.parse_args()
+    stack_names = [s.strip() for s in args.stacks.split(",")] if args.stacks else DEFAULT_STACKS
+    unknown = set(stack_names) - set(ALL_STACK_NAMES)
+    if unknown:
+        raise ValueError(f"unknown stack(s) {sorted(unknown)}, choose from {ALL_STACK_NAMES}")
+
     voe_scores = json.loads((ARTIFACTS_DIR / "voe_scores.json").read_text(encoding="utf-8"))
 
     decode_results: dict[str, dict] = {}
@@ -67,7 +92,7 @@ def main() -> None:
     timings: dict[str, float] = {}
     degenerate_cells: list[str] = []  # "stack/law: decode|intervention" for the caveats section
 
-    for stack_name in STACK_NAMES:
+    for stack_name in stack_names:
         encoder = _load_encoder(stack_name)
         predictor = _load_predictor_for(stack_name, encoder)
 
@@ -147,7 +172,7 @@ def main() -> None:
     md_lines.append("")
     md_lines.append("| stack | law | variable | kind | value | window |")
     md_lines.append("| --- | --- | --- | --- | --- | --- |")
-    for stack_name in STACK_NAMES:
+    for stack_name in stack_names:
         for law_name in ALL_LAWS:
             key = f"{stack_name}/{law_name}"
             window_flag = "**VACUOUS**" if decode_results[key]["degenerate"] else "ok"
@@ -170,7 +195,7 @@ def main() -> None:
     md_lines.append("")
     md_lines.append("| stack | law | effect_concept | effect_placebo | delta | 95% CI | n_positive/16 | causal_positive | alpha | window |")
     md_lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
-    for stack_name in STACK_NAMES:
+    for stack_name in stack_names:
         for law_name in ALL_LAWS:
             key = f"{stack_name}/{law_name}"
             r = intervention_results[key]
