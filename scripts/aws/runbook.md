@@ -8,11 +8,59 @@ itself. Run every step below **from the laptop** unless marked otherwise.
 
 - Spot `g4dn.xlarge` in `eu-west-1`: roughly **$0.16-0.53/hr** depending on
   spot pricing at request time.
-- Expected total job time: **1-3 hours** (pytest + both smoke tests + cache
-  population across train/val/eval/probe clip sets for both encoders).
-- Expected cost per run: **roughly $0.20-1.60**.
+- **V-JEPA-2 throughput (class G, see docs/failure-sweeps.md):** measured
+  ~40s/clip fp32 unbatched on a T4 -- at that rate, 672 clips x 2 encoders
+  needs 10+ hours, which is why the fp16 + batching work in
+  `physics_auditor/models/pretrained.py` exists. With `.load()`'s fp16 cast
+  and `VJEPA2Encoder.encode_batch` (default batch_size=4 on cuda) the
+  expected per-clip cost drops substantially (fp16 typically ~2x, batching
+  of 4 typically another ~2-3x on a T4 for a ViT-L-sized model) -- treat
+  this as a rough **~5-8x** combined speedup estimate, not a measured
+  number, until confirmed against a real T4 run. DINOv2 is comparatively
+  cheap (ViT-S, already frame-batched) and was not the bottleneck.
+- Expected total job time: **1-3 hours** on a *resumed* run picking up from
+  a prior `cache-partial/` sync (see Resume semantics below); a cold run
+  with no partial cache and the old fp32/unbatched V-JEPA-2 path could take
+  10+ hours -- always check whether `s3://physics-auditor-<account>/results/cache-partial/`
+  already has content before assuming a fresh multi-hour budget.
+- Expected cost per run: **roughly $0.20-1.60** for a resumed/fp16-batched
+  run; budget more for a cold run against the old (fixed) per-clip cost.
 - Hard backstop: `remote_job.sh` schedules `sudo shutdown -h +240` (4h) at
   the very start, so a wedged job cannot run away with cost.
+
+## Resume semantics + cache-partial layout (class G)
+
+`remote_job.sh` is now resumable by construction:
+
+1. **Pre-seed:** immediately after repo untar (before any encoding step),
+   it runs `aws s3 sync s3://$BUCKET/results/cache-partial ./cache`. Since
+   `models/cache.py`'s `encode_clip_cached` already skips any `.npy` that
+   already exists on disk, every clip already cached from a prior run (or
+   from the committed local stacks) is free -- nothing is re-downloaded or
+   re-encoded.
+2. **Background partial-sync loop:** started right after the ERR trap and
+   cost backstop are armed and `BUCKET` is validated (before the repo is
+   even downloaded), it pushes `./cache -> s3://$BUCKET/results/cache-partial`
+   every `SYNC_INTERVAL_S` seconds (default 600 = 10 min). This used to be
+   a manual `aws s3 sync` loop bolted on ad hoc via SSM mid-run -- it is now
+   part of the script itself.
+3. **Stop + final sync:** both the normal success path and `on_error` call
+   a shared `stop_partial_sync_loop` (kill the background loop, then push
+   one last sync) before shutdown, so at most `SYNC_INTERVAL_S` seconds of
+   work (rather than the whole job) can ever be lost to a kill or crash.
+
+**Layout:** `cache-partial/<encoder_cache_key>/<scenario_id>.npy`, e.g.
+`cache-partial/dinov2-s14-74d24787/deadbeef00.npy`. `<encoder_cache_key>` is
+`{name}-{sha1(state_dict bytes)[:8]}` (see `models/pretrained.py`), so a
+retrained/re-fingerprinted encoder gets its own subdirectory rather than
+silently mixing latents from two different weight versions. After a full
+successful run, `cache-partial/` should mirror `cache/` inside
+`results/cache.tar.gz` for the requested stacks.
+
+If a run is killed or fails partway through, the NEXT dispatch (same or
+different `--stacks`) will pick up automatically from whatever
+`cache-partial/` holds -- no manual intervention needed beyond re-running
+`launch_gpu.sh`.
 
 ## Mandatory pre-launch sequence (do all three, in order, every time)
 

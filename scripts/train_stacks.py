@@ -22,7 +22,7 @@ import torch
 from physics_auditor.generator.clip import Clip
 from physics_auditor.generator.dataset import eval_pairs, train_clips, val_clips
 from physics_auditor.laws import ALL_LAWS
-from physics_auditor.models.cache import encode_clip_cached
+from physics_auditor.models.cache import encode_clip_cached, encode_clips_cached
 from physics_auditor.models.encoders import RawPixelEncoder, TinyCNNAE, TinyCNNPred
 from physics_auditor.models.predictor import (
     LatentPredictor,
@@ -52,6 +52,21 @@ PREDICTOR_WEIGHTS = {
 DEFAULT_STACKS = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
 PRETRAINED_STACKS = ["dinov2-s14", "vjepa2-vitl"]
 ALL_STACK_NAMES = DEFAULT_STACKS + PRETRAINED_STACKS
+
+
+def plan_stacks(requested: list[str]) -> list[str]:
+    """Pure, side-effect-free cache-warm plan: given the requested stack
+    names (already validated against ALL_STACK_NAMES), returns exactly the
+    stack names that will be built/encoded, in build order (local stacks
+    first, then pretrained). This is the single source of truth `main()`
+    consults for stack selection -- MUST exactly match `requested`, with no
+    extra local-stack work slipping in when only pretrained stacks are
+    requested (see docs/failure-sweeps.md class G: a prior GPU run invoked
+    with `--stacks dinov2-s14,vjepa2-vitl` wasted ~2h re-encoding all 3
+    local stacks anyway)."""
+    plan = [name for name in DEFAULT_STACKS if name in requested]
+    plan += [name for name in PRETRAINED_STACKS if name in requested]
+    return plan
 
 
 def _load_pretrained_encoder(name: str):
@@ -111,18 +126,16 @@ def populate_caches(stacks: list, force: bool = False) -> dict[str, int]:
     given stacks. Returns {cache_key: n_files_written_or_present}."""
     counts: dict[str, int] = {}
 
-    def _do(clip: Clip) -> None:
-        for enc in stacks:
-            encode_clip_cached(enc, clip, cache_dir=str(CACHE_DIR))
-
-    for clip in train_clips():
-        _do(clip)
-    for clip in val_clips():
-        _do(clip)
+    all_clips: list[Clip] = []
+    all_clips.extend(train_clips())
+    all_clips.extend(val_clips())
     for law_name in ALL_LAWS:
         for pair in eval_pairs(law_name):
-            _do(pair.obey)
-            _do(pair.violate)
+            all_clips.append(pair.obey)
+            all_clips.append(pair.violate)
+
+    for enc in stacks:
+        encode_clips_cached(enc, all_clips, cache_dir=str(CACHE_DIR))
 
     for enc in stacks:
         key_dir = CACHE_DIR / enc.cache_key
@@ -223,12 +236,13 @@ def main() -> None:
     train = list(train_clips())
     print(f"  {len(train)} clips, {sum(c.frames.shape[0] for c in train)} frames")
 
+    plan = plan_stacks(requested)
     stacks = []
 
-    if "raw-pixel" in requested:
+    if "raw-pixel" in plan:
         stacks.append(RawPixelEncoder())
 
-    if "tiny-cnn-ae" in requested:
+    if "tiny-cnn-ae" in plan:
         print("\nTraining TinyCNNAE (reconstructive)...")
         ae, ae_losses, ae_time = load_or_train_ae(train, force=args.force)
         if ae_losses is None:
@@ -238,7 +252,7 @@ def main() -> None:
         print(f"  cache_key: {ae.cache_key}")
         stacks.append(ae)
 
-    if "tiny-cnn-pred" in requested:
+    if "tiny-cnn-pred" in plan:
         print("\nTraining TinyCNNPred (predictive)...")
         pred, pred_losses, pred_time = load_or_train_pred(train, force=args.force)
         if pred_losses is None:
@@ -249,7 +263,7 @@ def main() -> None:
         stacks.append(pred)
 
     for name in PRETRAINED_STACKS:
-        if name in requested:
+        if name in plan:
             print(f"\nLoading pretrained {name} (real weights, GPU box only)...")
             enc = _load_pretrained_encoder(name)
             print(f"  cache_key: {enc.cache_key}")

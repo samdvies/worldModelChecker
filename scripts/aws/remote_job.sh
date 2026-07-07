@@ -33,9 +33,31 @@ upload_log() {
     aws s3 cp "$LOG_FILE" "s3://${BUCKET:-unknown-bucket}/results/remote_job.log" --region "$REGION" || true
 }
 
+# Class G (see docs/failure-sweeps.md): a prior run re-encoded ~2,290 clips'
+# worth of latents that were then LOST when the job was killed, because
+# nothing synced partial progress to S3 until the very end. SYNC_PID tracks
+# the background partial-sync loop (started below, once BUCKET is known) so
+# both the success path and on_error can cleanly stop it and push one final
+# sync -- initialised here (before the loop exists) so on_error can safely
+# reference it even if a failure happens before the loop is started.
+SYNC_PID=""
+
+stop_partial_sync_loop() {
+    if [ -n "$SYNC_PID" ]; then
+        kill "$SYNC_PID" >/dev/null 2>&1 || true
+        wait "$SYNC_PID" 2>/dev/null || true
+        SYNC_PID=""
+    fi
+    # Final sync regardless of whether the loop had even started -- cheap
+    # and idempotent (aws s3 sync only pushes new/changed files), and it's
+    # the last chance to persist any cache/ work before the box terminates.
+    aws s3 sync "$REPO_DIR/cache" "s3://${BUCKET:-unknown-bucket}/results/cache-partial" --region "$REGION" || true
+}
+
 on_error() {
     local exit_code=$?
-    echo "== FAILED (exit $exit_code) at $(date -u +%FT%TZ) -- uploading log before shutdown =="
+    echo "== FAILED (exit $exit_code) at $(date -u +%FT%TZ) -- syncing partial cache + uploading log before shutdown =="
+    stop_partial_sync_loop
     upload_log
     sudo shutdown -h now || true
     exit "$exit_code"
@@ -52,6 +74,28 @@ if [ -z "${BUCKET:-}" ]; then
     false
 fi
 
+# Class G (see docs/failure-sweeps.md): resumability + redundant recompute.
+# Started right after the ERR trap/backstop are armed and BUCKET is known
+# to be valid, so ANY subsequent failure (including one before the repo is
+# even downloaded) still gets a partial-cache push via stop_partial_sync_loop
+# in on_error above. `$REPO_DIR/cache` may not exist/be empty yet at this
+# point -- `mkdir -p` + an empty-source `aws s3 sync` are both no-ops, so
+# starting this early is safe.
+SYNC_INTERVAL_S="${SYNC_INTERVAL_S:-600}"
+mkdir -p "$REPO_DIR/cache"
+
+start_partial_sync_loop() {
+    (
+        while true; do
+            sleep "$SYNC_INTERVAL_S"
+            aws s3 sync "$REPO_DIR/cache" "s3://${BUCKET}/results/cache-partial" --region "$REGION" || true
+        done
+    ) &
+    SYNC_PID=$!
+    echo "== partial-sync loop started (pid $SYNC_PID, every ${SYNC_INTERVAL_S}s) =="
+}
+start_partial_sync_loop
+
 t0=$(date +%s)
 log_elapsed() { echo "[+$(( $(date +%s) - t0 ))s] $*"; }
 
@@ -59,6 +103,9 @@ log_elapsed "== download + untar repo =="
 aws s3 cp "s3://${BUCKET}/repo/physics-auditor.tar.gz" "$WORKDIR/physics-auditor.tar.gz" --region "$REGION"
 tar -xzf "$WORKDIR/physics-auditor.tar.gz" -C "$REPO_DIR"
 cd "$REPO_DIR"
+
+log_elapsed "== pre-seed cache/ from any previously-synced partial results (resumability, class G) =="
+aws s3 sync "s3://${BUCKET}/results/cache-partial" "$REPO_DIR/cache" --region "$REGION" || true
 
 log_elapsed "== install uv =="
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -102,6 +149,9 @@ uv run python scripts/train_stacks.py --stacks dinov2-s14,vjepa2-vitl
 log_elapsed "== populate probe latent caches: probe-train(300..331)/probe-test(400..415) via mechanistic run =="
 uv run python scripts/run_report_card.py --stacks dinov2-s14,vjepa2-vitl
 uv run python scripts/run_mechanistic.py --stacks dinov2-s14,vjepa2-vitl
+
+log_elapsed "== stop partial-sync loop + push final cache-partial sync =="
+stop_partial_sync_loop
 
 log_elapsed "== tar cache/ + logs, upload to S3 =="
 tar -czf "$WORKDIR/cache.tar.gz" -C "$REPO_DIR" cache

@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from physics_auditor.models.cache import encode_clip_cached
-from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder
+from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder, _device_plan
 
 
 @dataclass
@@ -307,6 +307,116 @@ def test_vjepa2_spatial_mean_pipeline_correctness():
     # a sum-pooling regression would diverge sharply from the mean-pooled value
     wrong_sum = base + np.sum(np.arange(num_spatial, dtype=np.float32))
     assert not np.allclose(z[0], wrong_sum, rtol=1e-4, atol=1e-5)
+
+
+class _MockVJEPABatched(nn.Module):
+    """Unlike _MockVJEPA (which hardcodes batch=1, matching how `encode`
+    always calls with B=1), this mock genuinely respects an arbitrary batch
+    dimension B -- each sample in the batch is processed independently, as
+    the real HF model does -- so it can exercise `encode_batch`'s B>1 path."""
+
+    def __init__(self, hidden_dim=1024, num_spatial=4):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_spatial = num_spatial
+        self.proj = nn.Linear(3, hidden_dim)
+
+    def forward(self, pixel_values_videos: torch.Tensor, **kwargs):
+        b, t, c, h, w = pixel_values_videos.shape
+        num_temporal = max(t // 2, 1)
+        pooled = pixel_values_videos.mean(dim=[3, 4])  # (B, T, 3)
+        temporal_pooled = pooled[:, : num_temporal * 2 : 2]  # (B, num_temporal, 3)
+        tokens = self.proj(temporal_pooled)  # (B, num_temporal, hidden_dim)
+        tokens = tokens.repeat_interleave(self.num_spatial, dim=1)  # (B, num_temporal*num_spatial, hidden)
+
+        class _Out:
+            pass
+
+        out = _Out()
+        out.last_hidden_state = tokens
+        return out
+
+
+def _mock_vjepa_batched(seed=0, hidden_dim=1024, num_spatial=4) -> _MockVJEPABatched:
+    torch.manual_seed(seed)
+    m = _MockVJEPABatched(hidden_dim=hidden_dim, num_spatial=num_spatial)
+    m.eval()
+    return m
+
+
+def test_vjepa2_encode_batch_matches_unbatched_encode():
+    """encode_batch([...]) on several same-length clips must reproduce
+    exactly what calling encode() per-clip returns (within fp tolerance) --
+    this is the whole point of batching multiple clips per forward."""
+    enc = VJEPA2Encoder(model=_mock_vjepa_batched(seed=5))
+    clips = [_fake_clip(t=6, seed=i) for i in range(5)]
+
+    unbatched = [enc.encode(c) for c in clips]
+    batched = enc.encode_batch(clips, batch_size=2)  # forces >1 chunk (5 clips / 2)
+
+    assert len(batched) == len(clips)
+    for z_unbatched, z_batched in zip(unbatched, batched):
+        assert z_batched.shape == z_unbatched.shape
+        assert z_batched.dtype == np.float32
+        np.testing.assert_allclose(z_batched, z_unbatched, rtol=1e-4, atol=1e-5)
+
+
+def test_vjepa2_encode_batch_default_batch_size_is_1_on_cpu():
+    """Pins the pinned-design default: batch_size=1 on cpu, 4 on cuda. We
+    can't exercise real cuda here, but we can confirm the cpu default by
+    checking encode_batch's device plan directly."""
+    enc = VJEPA2Encoder(model=_mock_vjepa())
+    device, use_half, default_batch = _device_plan(
+        default_cpu_batch=enc.DEFAULT_CPU_BATCH_SIZE,
+        default_cuda_batch=enc.DEFAULT_CUDA_BATCH_SIZE,
+    )
+    assert device == "cpu"
+    assert use_half is False
+    assert default_batch == 1
+
+
+def test_vjepa2_encode_batch_groups_differing_t_into_separate_chunks():
+    """Clips with different T can't share a real batch forward -- confirm
+    mixed-T input still produces correct per-clip shapes (falls back to
+    per-clip chunks rather than erroring)."""
+    enc = VJEPA2Encoder(model=_mock_vjepa())
+    clips = [_fake_clip(t=4, seed=0), _fake_clip(t=6, seed=1), _fake_clip(t=4, seed=2)]
+    out = enc.encode_batch(clips, batch_size=4)
+    assert [z.shape[0] for z in out] == [4, 6, 4]
+    for z, c in zip(out, clips):
+        expected = enc.encode(c)
+        np.testing.assert_allclose(z, expected, rtol=1e-4, atol=1e-5)
+
+
+def test_vjepa2_fp16_cpu_equivalent_path_casts_back_to_float32():
+    """CPU-equivalent proof of the cuda-only fp16 path (pinned design item
+    1): calling the device-agnostic `_encode_core` directly with
+    use_half=True exercises the exact half-cast-then-cast-back-to-float32
+    code cuda would run, entirely on CPU hardware -- no real GPU needed.
+    torch.cuda.is_available() itself is never called here; this pins the
+    behaviour selected once cuda IS available."""
+    enc = VJEPA2Encoder(model=_mock_vjepa())
+    clip = _fake_clip(t=6)
+
+    z_full = enc._encode_core(clip, device="cpu", use_half=False)
+    z_half = enc._encode_core(clip, device="cpu", use_half=True)
+
+    assert z_half.dtype == np.float32  # cast back, never leaks float16 into the cache
+    assert z_full.dtype == np.float32
+    # fp16 has ~3 decimal digits of precision -- loose but not vacuous tolerance
+    np.testing.assert_allclose(z_half, z_full, rtol=1e-2, atol=1e-2)
+
+
+def test_dinov2_fp16_cpu_equivalent_path_casts_back_to_float32():
+    enc = DINOv2Encoder(model=_mock_dino())
+    clip = _fake_clip(t=4)
+
+    z_full = enc._encode_core(clip, device="cpu", use_half=False)
+    z_half = enc._encode_core(clip, device="cpu", use_half=True)
+
+    assert z_half.dtype == np.float32
+    assert z_full.dtype == np.float32
+    np.testing.assert_allclose(z_half, z_full, rtol=1e-2, atol=1e-2)
 
 
 def test_vjepa2_uses_run_backbone_hook_for_api_isolation():

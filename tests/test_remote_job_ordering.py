@@ -60,6 +60,65 @@ def test_trap_and_backstop_precede_the_bucket_check():
     )
 
 
+def test_partial_sync_loop_starts_after_err_trap_and_bucket_check():
+    """Class G (see docs/failure-sweeps.md): the background partial-sync
+    loop must not start before BUCKET is validated (it needs BUCKET to sync
+    anywhere useful) but must still exist to protect any failure from that
+    point on -- both the ERR trap and the BUCKET check must precede it."""
+    text = REMOTE_JOB.read_text(encoding="utf-8")
+    trap_line = _line_of(r"trap\s+on_error\s+ERR", text)
+    bucket_check_line = _line_of(r'-z\s+"\$\{BUCKET:-', text)
+    loop_start_line = _line_of(r"start_partial_sync_loop\s*$", text)
+    assert trap_line < loop_start_line
+    assert bucket_check_line < loop_start_line
+
+
+def test_partial_sync_loop_precedes_repo_download():
+    """The loop must be armed before the (slow, failure-prone) repo
+    download/untar step, so a download failure still gets a partial-cache
+    sync attempt via on_error."""
+    text = REMOTE_JOB.read_text(encoding="utf-8")
+    loop_start_line = _line_of(r"start_partial_sync_loop\s*$", text)
+    download_line = _line_of(r"download \+ untar repo", text)
+    assert loop_start_line < download_line
+
+
+def test_cache_preseed_precedes_any_encoding_step():
+    """Pre-seeding cache/ from cache-partial must happen after repo untar
+    but before any of the (expensive) encoding steps -- otherwise the
+    resumability the pre-seed exists for never kicks in."""
+    text = REMOTE_JOB.read_text(encoding="utf-8")
+    untar_line = _line_of(r"tar -xzf .*physics-auditor\.tar\.gz", text)
+    preseed_line = _line_of(r"aws s3 sync .*cache-partial.*REPO_DIR/cache", text)
+    train_stacks_line = _line_of(r"train_stacks\.py --stacks", text)
+    assert untar_line < preseed_line < train_stacks_line
+
+
+def test_stop_partial_sync_loop_called_in_on_error_and_success_path():
+    """Both the on_error trap handler and the normal success path must stop
+    the loop (kill + final sync) -- a job that succeeds without pushing its
+    last few minutes of cache work, or one that fails and leaves the loop
+    running into the shutdown, both defeat the point of this guard."""
+    text = REMOTE_JOB.read_text(encoding="utf-8")
+    on_error_start = _line_of(r"^on_error\(\)\s*\{", text)
+    trap_line = _line_of(r"trap\s+on_error\s+ERR", text)
+    on_error_body = "\n".join(text.splitlines()[on_error_start - 1: trap_line - 1])
+    assert "stop_partial_sync_loop" in on_error_body, (
+        "on_error() must call stop_partial_sync_loop before shutdown"
+    )
+
+    shutdown_now_line = _line_of(r"shutdown -h now$", text)
+    lines = text.splitlines()
+    # the LAST "stop_partial_sync_loop" call in the file, outside on_error,
+    # must occur before the final (success-path) shutdown -h now.
+    success_path_calls = [
+        i for i, line in enumerate(lines, start=1)
+        if re.search(r"^stop_partial_sync_loop\s*$", line)
+    ]
+    assert success_path_calls, "expected a top-level stop_partial_sync_loop call in the success path"
+    assert success_path_calls[-1] < shutdown_now_line
+
+
 def test_no_unguarded_var_expansion_under_set_u():
     """Every shell script that may run remotely (under `set -u`) must guard
     variable expansions that are not parameters/locals with a default
