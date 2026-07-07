@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Physics Auditor -- Minimal-Pair Gallery</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #171b22;
+    --panel-2: #1e232c;
+    --border: #2a3140;
+    --text: #e6e9ef;
+    --text-dim: #9aa4b2;
+    --accent: #5eb0ef;
+    --red: #e5534b;
+    --green: #3fb950;
+    --amber: #d29922;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --panel-2: #eef0f3;
+      --border: #d7dbe2;
+      --text: #1a1d23;
+      --text-dim: #5b6470;
+      --accent: #1467b0;
+      --red: #c62b23;
+      --green: #1f8a3b;
+      --amber: #97650f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header.top {
+    padding: 20px 24px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header.top h1 { margin: 0 0 6px; font-size: 20px; }
+  .gpu-note {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--amber);
+    border-radius: 6px;
+    color: var(--amber);
+    font-size: 12.5px;
+    background: color-mix(in srgb, var(--amber) 10%, transparent);
+  }
+  .global-caveats {
+    max-width: 980px;
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+  }
+  .global-caveats ul { margin: 4px 0 0; padding-left: 18px; }
+
+  nav.tabs {
+    display: flex;
+    gap: 6px;
+    padding: 10px 24px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  nav.tabs button {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13.5px;
+  }
+  nav.tabs button.active {
+    background: var(--accent);
+    color: #0e1116;
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+
+  main { padding: 20px 24px 60px; max-width: 1180px; margin: 0 auto; }
+  section.law-section { display: none; }
+  section.law-section.active { display: block; }
+
+  h2.law-title { margin: 0 0 4px; font-size: 18px; text-transform: capitalize; }
+  .law-sub { color: var(--text-dim); font-size: 12.5px; margin-bottom: 14px; }
+
+  .players {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+  .player {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+  }
+  .player h3 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .badge {
+    font-size: 10.5px;
+    padding: 1px 7px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .badge.obey { color: var(--green); border-color: var(--green); }
+  .badge.violate { color: var(--red); border-color: var(--red); }
+  canvas.frame-canvas {
+    width: 100%;
+    max-width: 320px;
+    display: block;
+    margin: 0 auto;
+    image-rendering: pixelated;
+    background: #000;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  canvas.frame-canvas.critical-hit {
+    outline: 3px solid var(--red);
+  }
+
+  .transport {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 12px 0;
+    flex-wrap: wrap;
+  }
+  .transport button {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .transport label { font-size: 12.5px; color: var(--text-dim); }
+  .transport select {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 6px;
+  }
+  .frame-counter { font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--text-dim); }
+  .scrub-wrap { flex: 1 1 260px; position: relative; height: 26px; }
+  input[type=range].scrubber {
+    width: 100%;
+    margin: 0;
+    position: relative;
+    z-index: 2;
+  }
+  .critical-marker {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--red);
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .trace-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 14px;
+  }
+  .trace-box h4 { margin: 0 0 8px; font-size: 13px; }
+  svg.trace-svg { width: 100%; height: 220px; overflow: visible; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 8px;
+    font-size: 12px;
+  }
+  .legend .item { display: flex; align-items: center; gap: 5px; }
+  .legend .swatch { width: 12px; height: 3px; display: inline-block; border-radius: 2px; }
+  .legend .auroc { color: var(--text-dim); }
+  .legend .item.degenerate .auroc { color: var(--amber); }
+  .hover-readout {
+    font-size: 12px;
+    color: var(--text-dim);
+    min-height: 16px;
+    margin-top: 4px;
+  }
+
+  .monitor-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .monitor-chip {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 6px 12px;
+    font-size: 12.5px;
+  }
+  .monitor-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    opacity: 0.5;
+  }
+  .monitor-dot.fired { background: var(--red); opacity: 1; box-shadow: 0 0 6px var(--red); }
+  .monitor-status { color: var(--text-dim); }
+
+  .caveats-footer {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .caveats-footer h4 { margin: 0 0 6px; color: var(--text); font-size: 12.5px; }
+  .caveats-footer ul { margin: 0; padding-left: 18px; }
+  .caveats-footer li { margin-bottom: 4px; }
+
+  .permanence-hook {
+    background: var(--panel);
+    border: 1px dashed var(--accent);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+  }
+  .permanence-hook p { margin: 0 0 10px; }
+  .permanence-hook button {
+    background: var(--accent);
+    color: #0e1116;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .permanence-reveal { display: none; margin-top: 10px; font-size: 12.5px; color: var(--text-dim); }
+  .permanence-reveal.shown { display: block; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1>Physics Auditor -- Minimal-Pair Gallery</h1>
+  <div class="global-caveats">
+    <span class="gpu-note">toy from-scratch stacks; V-JEPA-2/DINOv2 columns arrive when the GPU cache lands</span>
+    <ul id="global-caveats-list"></ul>
+  </div>
+</header>
+
+<nav class="tabs" id="law-tabs"></nav>
+
+<main id="law-sections"></main>
+
+<script src="gallery_data.js"></script>
+<script>
+(function () {
+  "use strict";
+  var DATA = GALLERY_DATA;
+  var LAW_NAMES = Object.keys(DATA.laws);
+  var STACK_COLORS = {
+    "oracle": "#8a8fa3",
+    "pixel-static": "#d29922",
+    "pixel-linear": "#c77dd2",
+    "raw-pixel": "#5eb0ef",
+    "tiny-cnn-ae": "#3fb950",
+    "tiny-cnn-pred": "#e5534b"
+  };
+  var STACK_ORDER = ["oracle", "pixel-static", "pixel-linear"].concat(DATA.stack_names);
+
+  function el(tag, attrs, children) {
+    var e = document.createElement(tag);
+    attrs = attrs || {};
+    for (var k in attrs) {
+      if (k === "class") e.className = attrs[k];
+      else if (k === "text") e.textContent = attrs[k];
+      else if (k === "html") e.innerHTML = attrs[k];
+      else e.setAttribute(k, attrs[k]);
+    }
+    (children || []).forEach(function (c) { if (c) e.appendChild(c); });
+    return e;
+  }
+
+  // ---- global caveats ----
+  var gcList = document.getElementById("global-caveats-list");
+  (DATA.caveats || []).forEach(function (c) {
+    gcList.appendChild(el("li", { text: c }));
+  });
+
+  // ---- tabs + sections ----
+  var tabsNav = document.getElementById("law-tabs");
+  var sectionsMain = document.getElementById("law-sections");
+
+  LAW_NAMES.forEach(function (lawName, idx) {
+    var tabBtn = el("button", { text: lawName, "data-law": lawName });
+    if (idx === 0) tabBtn.classList.add("active");
+    tabBtn.addEventListener("click", function () { activateLaw(lawName); });
+    tabsNav.appendChild(tabBtn);
+
+    var section = buildLawSection(lawName, DATA.laws[lawName]);
+    if (idx === 0) section.classList.add("active");
+    sectionsMain.appendChild(section);
+  });
+
+  function activateLaw(lawName) {
+    Array.prototype.forEach.call(tabsNav.querySelectorAll("button"), function (b) {
+      b.classList.toggle("active", b.getAttribute("data-law") === lawName);
+    });
+    Array.prototype.forEach.call(sectionsMain.querySelectorAll("section.law-section"), function (s) {
+      s.classList.toggle("active", s.getAttribute("data-law") === lawName);
+    });
+  }
+
+  // ---- per-law section builder ----
+  function buildLawSection(lawName, law) {
+    var section = el("section", { class: "law-section", id: "law-" + lawName, "data-law": lawName });
+    var nFrames = law.n_frames;
+    var criticalFrame = law.critical_frame;
+
+    section.appendChild(el("h2", { class: "law-title", text: lawName }));
+    section.appendChild(el("div", {
+      class: "law-sub",
+      text: "critical frame " + criticalFrame + " of " + nFrames + " -- frames advance together, obey | violate"
+    }));
+
+    if (lawName === "permanence") {
+      section.appendChild(buildPermanenceHook(law));
+    }
+
+    // players
+    var canvasObey = el("canvas", { class: "frame-canvas", id: "canvas-" + lawName + "-obey" });
+    var canvasViolate = el("canvas", { class: "frame-canvas", id: "canvas-" + lawName + "-violate" });
+    var playerObey = el("div", { class: "player" }, [
+      el("h3", {}, [document.createTextNode("obey "), el("span", { class: "badge obey", text: "lawful" })]),
+      canvasObey
+    ]);
+    var playerViolate = el("div", { class: "player" }, [
+      el("h3", {}, [document.createTextNode("violate "), el("span", { class: "badge violate", text: "broken" })]),
+      canvasViolate
+    ]);
+    section.appendChild(el("div", { class: "players" }, [playerObey, playerViolate]));
+
+    // transport
+    var playBtn = el("button", { text: "Play", id: "play-" + lawName });
+    var stepBackBtn = el("button", { text: "<", id: "back-" + lawName });
+    var stepFwdBtn = el("button", { text: ">", id: "fwd-" + lawName });
+    var speedSel = el("select", { id: "speed-" + lawName });
+    [["0.25", "0.25x"], ["0.5", "0.5x"], ["1", "1x"], ["2", "2x"], ["4", "4x"]].forEach(function (opt) {
+      var o = el("option", { value: opt[0], text: opt[1] });
+      if (opt[0] === "1") o.selected = true;
+      speedSel.appendChild(o);
+    });
+    var scrubWrap = el("div", { class: "scrub-wrap" });
+    var scrubber = el("input", {
+      type: "range", class: "scrubber", id: "scrub-" + lawName,
+      min: "0", max: String(nFrames - 1), value: "0", step: "1"
+    });
+    var markerPct = (criticalFrame / Math.max(1, nFrames - 1)) * 100;
+    var marker = el("div", { class: "critical-marker" });
+    marker.style.left = markerPct + "%";
+    scrubWrap.appendChild(scrubber);
+    scrubWrap.appendChild(marker);
+    var counter = el("span", { class: "frame-counter", id: "counter-" + lawName, text: "0 / " + (nFrames - 1) });
+
+    var transport = el("div", { class: "transport" }, [
+      playBtn, stepBackBtn, stepFwdBtn,
+      scrubWrap, counter,
+      el("label", { text: "speed" }), speedSel
+    ]);
+    section.appendChild(transport);
+
+    // monitor row
+    var monitorRow = el("div", { class: "monitor-row", id: "monitor-row-" + lawName });
+    DATA.stack_names.forEach(function (stackName) {
+      var dot = el("span", { class: "monitor-dot", id: "monitor-dot-" + lawName + "-" + stackName });
+      var status = el("span", { class: "monitor-status", id: "monitor-status-" + lawName + "-" + stackName, text: "never fired" });
+      monitorRow.appendChild(el("span", { class: "monitor-chip" }, [
+        dot, el("span", { text: stackName }), status
+      ]));
+    });
+    section.appendChild(monitorRow);
+
+    // trace chart
+    var traceBox = el("div", { class: "trace-box" });
+    traceBox.appendChild(el("h4", { text: "per-frame surprise (violate clip; normalised per stack)" }));
+    var svgId = "trace-svg-" + lawName;
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "trace-svg");
+    svg.setAttribute("id", svgId);
+    svg.setAttribute("viewBox", "0 0 1000 220");
+    svg.setAttribute("preserveAspectRatio", "none");
+    traceBox.appendChild(svg);
+    var legend = el("div", { class: "legend", id: "legend-" + lawName });
+    STACK_ORDER.forEach(function (stackName) {
+      if (!law.traces[stackName]) return;
+      var aurocInfo = (law.metadata.auroc && law.metadata.auroc[stackName]) || null;
+      var aurocText = aurocInfo ? ("AUROC " + aurocInfo.auroc.toFixed(3) + (aurocInfo.degenerate ? " (degenerate)" : "")) : "";
+      var item = el("div", { class: "legend item" + (aurocInfo && aurocInfo.degenerate ? " degenerate" : "") }, [
+        el("span", { class: "swatch" }),
+        el("span", { text: stackName }),
+        el("span", { class: "auroc", text: aurocText })
+      ]);
+      item.querySelector(".swatch").style.background = STACK_COLORS[stackName] || "#888";
+      legend.appendChild(item);
+    });
+    traceBox.appendChild(legend);
+    var hoverReadout = el("div", { class: "hover-readout", id: "hover-" + lawName, text: " " });
+    traceBox.appendChild(hoverReadout);
+    section.appendChild(traceBox);
+
+    // caveats footer
+    var footer = el("div", { class: "caveats-footer" });
+    footer.appendChild(el("h4", { text: "caveats (verbatim)" }));
+    var ul = el("ul");
+    (DATA.caveats || []).forEach(function (c) { ul.appendChild(el("li", { text: c })); });
+    if (law.metadata && law.metadata.degenerate_cells && law.metadata.degenerate_cells.length) {
+      ul.appendChild(el("li", { text: "degenerate cells for " + lawName + ": " + law.metadata.degenerate_cells.join(", ") }));
+    }
+    footer.appendChild(ul);
+    section.appendChild(footer);
+
+    // wire up player state
+    initPlayer(lawName, law, {
+      canvasObey: canvasObey, canvasViolate: canvasViolate,
+      playBtn: playBtn, stepBackBtn: stepBackBtn, stepFwdBtn: stepFwdBtn,
+      speedSel: speedSel, scrubber: scrubber, counter: counter,
+      svg: svg
+    });
+
+    return section;
+  }
+
+  function buildPermanenceHook(law) {
+    var box = el("div", { class: "permanence-hook" });
+    box.appendChild(el("p", {
+      text: "Spot the violation frame in the violate clip above by eye. The occluder hides it -- pixels alone won't tell you. " +
+            "The oracle sees the true world state and knows instantly."
+    }));
+    var revealBtn = el("button", { text: "Reveal answer" });
+    var reveal = el("div", { class: "permanence-reveal" }, [
+      el("p", { text: "Critical (violation) frame: " + law.critical_frame + " of " + law.n_frames + "." }),
+      el("p", { text: "The oracle trace (grey line in the chart below) spikes exactly there because it reads WorldState directly, not pixels." })
+    ]);
+    revealBtn.addEventListener("click", function () {
+      reveal.classList.toggle("shown");
+      revealBtn.textContent = reveal.classList.contains("shown") ? "Hide answer" : "Reveal answer";
+    });
+    box.appendChild(revealBtn);
+    box.appendChild(reveal);
+    return box;
+  }
+
+  // ---- player logic ----
+  function initPlayer(lawName, law, ui) {
+    var nFrames = law.n_frames;
+    var criticalFrame = law.critical_frame;
+    var frame = 0;
+    var playing = false;
+    var lastTs = null;
+    var accumMs = 0;
+    var FRAME_MS = 140; // base ms per frame at 1x
+
+    var ctxObey = ui.canvasObey.getContext("2d");
+    var ctxViolate = ui.canvasViolate.getContext("2d");
+    var imgObey = new Array(nFrames);
+    var imgViolate = new Array(nFrames);
+
+    function loadImages() {
+      for (var i = 0; i < nFrames; i++) {
+        (function (i) {
+          var a = new Image();
+          a.onload = function () { if (frame === i) drawFrame(i); };
+          a.src = "data:image/png;base64," + law.obey_frames[i];
+          imgObey[i] = a;
+          var b = new Image();
+          b.onload = function () { if (frame === i) drawFrame(i); };
+          b.src = "data:image/png;base64," + law.violate_frames[i];
+          imgViolate[i] = b;
+        })(i);
+      }
+    }
+    loadImages();
+
+    function sizeCanvas(canvas, img) {
+      if (canvas.width !== img.naturalWidth && img.naturalWidth) {
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+      }
+    }
+
+    function drawFrame(i) {
+      var a = imgObey[i], b = imgViolate[i];
+      if (a && a.complete && a.naturalWidth) {
+        sizeCanvas(ui.canvasObey, a);
+        ctxObey.drawImage(a, 0, 0);
+      }
+      if (b && b.complete && b.naturalWidth) {
+        sizeCanvas(ui.canvasViolate, b);
+        ctxViolate.drawImage(b, 0, 0);
+      }
+      ui.canvasObey.classList.toggle("critical-hit", i === criticalFrame);
+      ui.canvasViolate.classList.toggle("critical-hit", i === criticalFrame);
+      ui.scrubber.value = String(i);
+      ui.counter.textContent = i + " / " + (nFrames - 1);
+      updatePlayhead(lawName, i);
+      updateMonitorFlags(lawName, law, i);
+    }
+
+    function setFrame(i) {
+      frame = Math.max(0, Math.min(nFrames - 1, i));
+      drawFrame(frame);
+    }
+
+    ui.scrubber.addEventListener("input", function () {
+      playing = false;
+      ui.playBtn.textContent = "Play";
+      setFrame(parseInt(ui.scrubber.value, 10));
+    });
+    ui.stepBackBtn.addEventListener("click", function () {
+      playing = false;
+      ui.playBtn.textContent = "Play";
+      setFrame(frame - 1);
+    });
+    ui.stepFwdBtn.addEventListener("click", function () {
+      playing = false;
+      ui.playBtn.textContent = "Play";
+      setFrame(frame + 1);
+    });
+    ui.playBtn.addEventListener("click", function () {
+      playing = !playing;
+      ui.playBtn.textContent = playing ? "Pause" : "Play";
+      if (playing) {
+        lastTs = null;
+        accumMs = 0;
+        requestAnimationFrame(tick);
+      }
+    });
+
+    function tick(ts) {
+      if (!playing) return;
+      if (lastTs === null) lastTs = ts;
+      var dt = ts - lastTs;
+      lastTs = ts;
+      var speed = parseFloat(ui.speedSel.value) || 1;
+      accumMs += dt * speed;
+      var stepMs = FRAME_MS;
+      while (accumMs >= stepMs) {
+        accumMs -= stepMs;
+        var next = frame + 1;
+        if (next > nFrames - 1) {
+          next = 0;
+        }
+        setFrame(next);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    // trace chart
+    drawTraceChart(lawName, law, ui.svg);
+    setFrame(0);
+  }
+
+  // ---- trace chart (SVG) ----
+  var PADDING = { left: 40, right: 10, top: 10, bottom: 24 };
+  var CHART_W = 1000, CHART_H = 220;
+  var playheadRegistry = {}; // lawName -> {line, svg, nFrames}
+
+  function drawTraceChart(lawName, law, svg) {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var nFrames = law.n_frames;
+    var criticalFrame = law.critical_frame;
+    var innerW = CHART_W - PADDING.left - PADDING.right;
+    var innerH = CHART_H - PADDING.top - PADDING.bottom;
+
+    function xFor(i) { return PADDING.left + (i / Math.max(1, nFrames - 1)) * innerW; }
+    function yFor(v) { return PADDING.top + (1 - Math.max(0, Math.min(1, v))) * innerH; }
+
+    var ns = "http://www.w3.org/2000/svg";
+
+    // axes
+    var axisG = document.createElementNS(ns, "g");
+    var yAxis = document.createElementNS(ns, "line");
+    yAxis.setAttribute("x1", PADDING.left); yAxis.setAttribute("y1", PADDING.top);
+    yAxis.setAttribute("x2", PADDING.left); yAxis.setAttribute("y2", PADDING.top + innerH);
+    yAxis.setAttribute("stroke", "currentColor"); yAxis.setAttribute("stroke-opacity", "0.3");
+    axisG.appendChild(yAxis);
+    var xAxis = document.createElementNS(ns, "line");
+    xAxis.setAttribute("x1", PADDING.left); xAxis.setAttribute("y1", PADDING.top + innerH);
+    xAxis.setAttribute("x2", PADDING.left + innerW); xAxis.setAttribute("y2", PADDING.top + innerH);
+    xAxis.setAttribute("stroke", "currentColor"); xAxis.setAttribute("stroke-opacity", "0.3");
+    axisG.appendChild(xAxis);
+    svg.appendChild(axisG);
+
+    // critical frame vertical line
+    var critLine = document.createElementNS(ns, "line");
+    critLine.setAttribute("x1", xFor(criticalFrame)); critLine.setAttribute("y1", PADDING.top);
+    critLine.setAttribute("x2", xFor(criticalFrame)); critLine.setAttribute("y2", PADDING.top + innerH);
+    critLine.setAttribute("stroke", "#e5534b");
+    critLine.setAttribute("stroke-width", "2");
+    critLine.setAttribute("stroke-dasharray", "4,3");
+    svg.appendChild(critLine);
+
+    // lines per stack
+    STACK_ORDER.forEach(function (stackName) {
+      var tr = law.traces[stackName];
+      if (!tr) return;
+      var vals = tr.violate;
+      var pts = vals.map(function (v, i) { return xFor(i) + "," + yFor(v); }).join(" ");
+      var poly = document.createElementNS(ns, "polyline");
+      poly.setAttribute("points", pts);
+      poly.setAttribute("fill", "none");
+      poly.setAttribute("stroke", STACK_COLORS[stackName] || "#888");
+      poly.setAttribute("stroke-width", "1.75");
+      poly.setAttribute("opacity", "0.9");
+      svg.appendChild(poly);
+    });
+
+    // playhead
+    var playhead = document.createElementNS(ns, "line");
+    playhead.setAttribute("x1", xFor(0)); playhead.setAttribute("y1", PADDING.top);
+    playhead.setAttribute("x2", xFor(0)); playhead.setAttribute("y2", PADDING.top + innerH);
+    playhead.setAttribute("stroke", "#ffffff");
+    playhead.setAttribute("stroke-width", "1.5");
+    playhead.setAttribute("id", "playhead-" + lawName);
+    svg.appendChild(playhead);
+
+    // hover capture rect
+    var hoverRect = document.createElementNS(ns, "rect");
+    hoverRect.setAttribute("x", PADDING.left); hoverRect.setAttribute("y", PADDING.top);
+    hoverRect.setAttribute("width", innerW); hoverRect.setAttribute("height", innerH);
+    hoverRect.setAttribute("fill", "transparent");
+    hoverRect.style.cursor = "crosshair";
+    hoverRect.addEventListener("mousemove", function (evt) {
+      var rect = svg.getBoundingClientRect();
+      var scaleX = CHART_W / rect.width;
+      var mouseX = (evt.clientX - rect.left) * scaleX;
+      var frac = (mouseX - PADDING.left) / innerW;
+      var i = Math.round(frac * (nFrames - 1));
+      i = Math.max(0, Math.min(nFrames - 1, i));
+      var readout = document.getElementById("hover-" + lawName);
+      if (!readout) return;
+      var parts = STACK_ORDER.filter(function (s) { return law.traces[s]; }).map(function (s) {
+        return s + "=" + law.traces[s].violate[i].toFixed(3);
+      });
+      readout.textContent = "frame " + i + ": " + parts.join("  ");
+    });
+    hoverRect.addEventListener("mouseleave", function () {
+      var readout = document.getElementById("hover-" + lawName);
+      if (readout) readout.textContent = " ";
+    });
+    svg.appendChild(hoverRect);
+
+    playheadRegistry[lawName] = { xFor: xFor, top: PADDING.top, bottom: PADDING.top + innerH };
+  }
+
+  function updatePlayhead(lawName, frameIdx) {
+    var reg = playheadRegistry[lawName];
+    var playhead = document.getElementById("playhead-" + lawName);
+    if (!reg || !playhead) return;
+    var x = reg.xFor(frameIdx);
+    playhead.setAttribute("x1", x);
+    playhead.setAttribute("x2", x);
+  }
+
+  function updateMonitorFlags(lawName, law, frameIdx) {
+    DATA.stack_names.forEach(function (stackName) {
+      var m = law.monitor[stackName];
+      var dot = document.getElementById("monitor-dot-" + lawName + "-" + stackName);
+      var status = document.getElementById("monitor-status-" + lawName + "-" + stackName);
+      if (!m || !dot || !status) return;
+      var fireFrame = m.fire_frame_violate;
+      var fired = fireFrame !== null && fireFrame !== undefined && frameIdx >= fireFrame;
+      dot.classList.toggle("fired", fired);
+      status.textContent = fired
+        ? ("fired @" + fireFrame)
+        : (fireFrame === null || fireFrame === undefined ? "never fired" : "not yet (@" + fireFrame + ")");
+    });
+  }
+
+})();
+</script>
+
+</body>
+</html>
