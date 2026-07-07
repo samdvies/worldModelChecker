@@ -2,11 +2,19 @@
 VoE on a tiny slice (2 pairs, 1 law), assert finite scores and a rendered
 card -- without paying for the full 16x4x6 grid."""
 import math
+from pathlib import Path
+
+import pytest
 
 from physics_auditor.generator.dataset import eval_pairs
 from physics_auditor.probes.behavioural.voe import run_voe
 from physics_auditor.report.card import ReportCard
 from scripts.run_report_card import build_adapters
+
+pytestmark = pytest.mark.skipif(
+    not Path("artifacts/weights").is_dir(),
+    reason="requires locally trained stack weights (artifacts/ is not shipped in the repo; run scripts/train_stacks.py first)",
+)
 
 
 def test_all_adapters_produce_finite_scores_and_card_renders():
