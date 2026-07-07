@@ -118,15 +118,22 @@ aws_cmd iam add-role-to-instance-profile \
     --profile "$PROFILE" \
     || echo "(role may already be attached -- continuing)"
 
-echo "== 5. resolve latest PyTorch Deep Learning AMI via SSM public parameter =="
-AMI_PARAM="/aws/service/deeplearning/ami/x86_64/pytorch/latest/ami-id"
+echo "== 5. resolve latest PyTorch Deep Learning AMI (describe-images) =="
 if [ "$DRY_RUN" = true ]; then
-    aws_cmd ssm get-parameters --names "$AMI_PARAM" --profile "$PROFILE" --region "$REGION"
+    aws_cmd ec2 describe-images --owners amazon \
+        --filters "Name=name,Values=Deep Learning OSS Nvidia Driver AMI GPU PyTorch*Ubuntu 22.04*" \
+        --query "sort_by(Images,&CreationDate)[-1].ImageId" \
+        --profile "$PROFILE" --region "$REGION"
     AMI_ID="ami-dryrun00000000000"
 else
-    AMI_ID=$(aws ssm get-parameters --names "$AMI_PARAM" \
-        --query "Parameters[0].Value" --output text \
+    AMI_ID=$(aws ec2 describe-images --owners amazon \
+        --filters "Name=name,Values=Deep Learning OSS Nvidia Driver AMI GPU PyTorch*Ubuntu 22.04*" \
+        --query "sort_by(Images,&CreationDate)[-1].ImageId" --output text \
         --profile "$PROFILE" --region "$REGION")
+fi
+if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "None" ]; then
+    echo "ERROR: could not resolve a Deep Learning AMI in $REGION" >&2
+    exit 1
 fi
 echo "AMI: $AMI_ID"
 
