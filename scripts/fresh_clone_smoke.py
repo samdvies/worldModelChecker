@@ -35,10 +35,11 @@ REQUIRED_TRACKED_FILES = [
 ]
 
 # Tripwire for gross regressions (a smoke tier that quietly grew to minutes),
-# not a benchmark: the tests themselves target ~10s but `uv run` adds ~2s of
-# process startup, which put honest runs right on a 10.0 edge and made the
-# gate flap.
-SMOKE_WALL_BUDGET_S = 20.0
+# not a benchmark. Calibration: warm-repo runs take ~11s, but this gate runs
+# in a COLD fresh export -- no __pycache__, first-ever torch import -- where
+# the honest floor measured 25.5s. 60s still trips on "smoke quietly became
+# minutes", which is the failure this exists to catch.
+SMOKE_WALL_BUDGET_S = 60.0
 
 
 def _tracked_files_at_head(repo_root: Path) -> set[str] | None:
