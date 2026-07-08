@@ -25,6 +25,7 @@ import torch
 from physics_auditor.laws import ALL_LAWS
 from physics_auditor.models.encoders import RawPixelEncoder, TinyCNNAE, TinyCNNPred
 from physics_auditor.models.predictor import load_predictor
+from physics_auditor.models.pretrained import resolve_cache_only
 from physics_auditor.monitor.detector import LawMonitor
 from physics_auditor.probes.behavioural.metrics import auroc
 from physics_auditor.probes.mechanistic.data import probe_pairs
@@ -41,8 +42,10 @@ PREDICTOR_WEIGHTS = {
     "raw-pixel": WEIGHTS_DIR / "predictor_raw-pixel.pt",
     "tiny-cnn-ae": WEIGHTS_DIR / "predictor_tiny-cnn-ae.pt",
     "tiny-cnn-pred": WEIGHTS_DIR / "predictor_tiny-cnn-pred.pt",
+    "dinov2-s14": WEIGHTS_DIR / "predictor_dinov2-s14.pt",
+    "vjepa2-vitl": WEIGHTS_DIR / "predictor_vjepa2-vitl.pt",
 }
-STACK_NAMES = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
+STACK_NAMES = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred", "dinov2-s14", "vjepa2-vitl"]
 LAMBDA_VARIANTS = [0.0, 1.0]
 
 
@@ -59,6 +62,10 @@ def _load_encoder(name: str):
         enc.model.load_state_dict(torch.load(PRED_WEIGHTS, map_location="cpu"))
         enc.model.eval()
         return enc
+    if name == "dinov2-s14":
+        return resolve_cache_only(name)
+    if name == "vjepa2-vitl":
+        return resolve_cache_only(name)
     raise ValueError(f"unknown stack {name}")
 
 
@@ -159,11 +166,22 @@ def main() -> None:
     md_lines.append("## Caveats")
     md_lines.append("")
     md_lines.append(
-        "- `permanence` is expected to be at-or-near chance / structurally blind: "
-        "its concept direction alpha collapses to ~0 in the intervention probe "
+        "- `permanence` is at-or-near chance / structurally blind for every "
+        "PER-FRAME stack (raw-pixel, tiny-cnn-ae, tiny-cnn-pred, dinov2-s14): "
+        "their concept direction alpha collapses to ~0 in the intervention probe "
         "(rung-3 finding, report_card_v2.md), so the projection term of the "
-        "monitor score carries no signal for this law regardless of stack -- this "
-        "is reported as the honest negative it is, not tuned around."
+        "monitor score carries no signal -- reported as the honest negative it "
+        "is, not tuned around. vjepa2-vitl is the exception (clip-level video "
+        "encoder, permanence AUROC 1.000)."
+    )
+    md_lines.append(
+        "- vjepa2-vitl latencies are NOT detection speeds: V-JEPA-2 encodes the "
+        "whole clip with bidirectional temporal attention, so a violation after "
+        "the critical frame perturbs latents of EARLIER frames too (obey/violate "
+        "clips are byte-identical before it). Negative latencies are future-frame "
+        "leakage through a non-causal encoder, not precognition; clip-level AUROC "
+        "is unaffected, but per-frame fire times for this stack are causally "
+        "uninterpretable. Causal (per-frame) stacks' latencies remain meaningful."
     )
     md_lines.append(
         "- Threshold is calibrated ONLY on probe-TRAIN (300..331) obey clips; "

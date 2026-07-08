@@ -52,7 +52,7 @@ OUT_DIR = ROOT / "docs" / "gallery"
 OUT_PATH = OUT_DIR / "gallery_data.js"
 
 SHOWCASE_SEED = 0  # outside every sacred probe-train (300..331) / probe-test (400..415) range
-STACK_NAMES = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
+STACK_NAMES = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred", "dinov2-s14", "vjepa2-vitl"]
 FRAME_SCALE = 3  # 64x64 -> 192x192
 
 
@@ -171,9 +171,16 @@ def main() -> None:
             "The showcase pair per law (seed=0) is illustrative only -- it is "
             "outside the sacred probe-train (300..331) / probe-test (400..415) "
             "seed ranges and contributes to no reported metric.",
-            "permanence's monitor projection term is expected to carry no "
-            "signal (concept-direction alpha collapses to ~0, report_card_v2.md "
-            "rung-3 finding) -- an honest null, not a bug.",
+            "permanence's monitor projection term carries no signal for the "
+            "per-frame stacks (concept-direction alpha collapses to ~0, "
+            "report_card_v2.md rung-3 finding) -- an honest null, not a bug. "
+            "vjepa2-vitl is the exception: as a clip-level video encoder it is "
+            "the only stack genuinely sensitive to permanence.",
+            "vjepa2-vitl traces are non-causal: V-JEPA-2 attends over the whole "
+            "clip, so post-violation frames perturb latents of earlier frames "
+            "too (the obey/violate inputs are byte-identical before the critical "
+            "frame). Its surprise may rise BEFORE the marker line -- future-frame "
+            "leakage, not early detection. Per-frame stacks' traces are causal.",
         ],
     }
 
