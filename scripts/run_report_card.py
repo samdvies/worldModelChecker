@@ -21,7 +21,7 @@ from physics_auditor.models.cache import encode_clip_cached
 from physics_auditor.models.encoders import RawPixelEncoder, TinyCNNAE, TinyCNNPred
 from physics_auditor.models.oracle import OracleAdapter
 from physics_auditor.models.predictor import load_predictor, load_predictor_meta
-from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder
+from physics_auditor.models.pretrained import resolve_cache_only
 from physics_auditor.models.stacks import LatentStackAdapter
 from physics_auditor.probes.behavioural.pixel_baseline import PixelLinearAdapter, PixelStaticAdapter
 from physics_auditor.probes.behavioural.voe import run_voe
@@ -60,9 +60,9 @@ def _load_encoder(name: str):
         enc.model.eval()
         return enc
     if name == "dinov2-s14":
-        return DINOv2Encoder().load()
+        return resolve_cache_only(name)
     if name == "vjepa2-vitl":
-        return VJEPA2Encoder().load()
+        return resolve_cache_only(name)
     raise ValueError(f"unknown stack {name}")
 
 

@@ -24,8 +24,10 @@ device-agnostic `_encode_core`/`_encode_core_batch` methods that take
 code path on CPU hardware (device="cpu", use_half=True) as a CPU-equivalent
 proof of the cuda behaviour, without ever needing a real GPU.
 """
+import glob
 import hashlib
 import io
+import os
 
 import numpy as np
 import torch
@@ -288,3 +290,52 @@ class VJEPA2Encoder:
         if batch_size is None:
             batch_size = default_batch
         return self._encode_core_batch(clips, device=device, use_half=use_half, batch_size=batch_size)
+
+
+class CacheOnlyEncoder:
+    """Stand-in for a pretrained encoder whose weights only ever load on the
+    GPU box (see module docstring): carries just the `name`/`cache_key` a
+    frozen latent cache was built under, satisfying the Encoder protocol so
+    it drops into LatentStackAdapter/encode_clip_cached, but `.encode()`
+    always raises -- a cache miss on a local machine means the GPU box has
+    not encoded that scenario yet, not something this process can fix by
+    downloading weights (blocked locally, see pretrained.py module docstring)."""
+
+    def __init__(self, name: str, cache_key: str):
+        self.name = name
+        self.cache_key = cache_key
+
+    def encode(self, clip: Clip) -> np.ndarray:
+        scenario_id = getattr(getattr(clip, "config", None), "scenario_id", None)
+        scenario_part = f" for scenario {scenario_id!r}" if scenario_id is not None else ""
+        raise RuntimeError(
+            f"{self.name} ({self.cache_key}): latent missing from the frozen "
+            f"cache{scenario_part} -- this encoder is cache-only and cannot "
+            f"encode locally; run the GPU box to add it to the cache "
+            f"(see scripts/aws/runbook.md)"
+        )
+
+
+def resolve_cache_only(name: str, cache_dir: str = "cache") -> CacheOnlyEncoder:
+    """Resolves a stack `name` to the single populated cache dir under
+    `{cache_dir}/{name}-*` and returns a CacheOnlyEncoder pinned to that
+    cache_key. Loud RuntimeError on zero or 2+ matches -- an ambiguous or
+    absent cache must never be silently guessed at (see module docstring:
+    stale partial dirs from a prior run may coexist with the current one
+    until a separate prune process removes them)."""
+    matches = sorted(glob.glob(os.path.join(cache_dir, f"{name}-*")))
+    matches = [m for m in matches if os.path.isdir(m)]
+    if not matches:
+        raise RuntimeError(
+            f"no cache dir for stack {name!r} under {cache_dir!r} -- run the "
+            f"GPU box first (see scripts/aws/runbook.md)"
+        )
+    if len(matches) > 1:
+        names = ", ".join(os.path.basename(m) for m in matches)
+        raise RuntimeError(
+            f"ambiguous cache state for stack {name!r} under {cache_dir!r}: "
+            f"{len(matches)} matching dirs ({names}) -- prune the stale one(s) "
+            f"before resolving"
+        )
+    cache_key = os.path.basename(matches[0])
+    return CacheOnlyEncoder(name=name, cache_key=cache_key)

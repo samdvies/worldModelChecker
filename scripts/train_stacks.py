@@ -32,7 +32,7 @@ from physics_auditor.models.predictor import (
     load_predictor,
     save_predictor,
 )
-from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder
+from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder, resolve_cache_only
 from physics_auditor.probes.mechanistic.data import probe_pairs
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,9 +71,14 @@ def plan_stacks(requested: list[str]) -> list[str]:
     return plan
 
 
-def _load_pretrained_encoder(name: str):
+def _load_pretrained_encoder(name: str, cache_only: bool = False):
     """Loads a pretrained stack's REAL weights via its lazy .load() -- only
-    safe to call on a machine with network access (GPU box)."""
+    safe to call on a machine with network access (GPU box). With
+    cache_only=True (--cache-only), instead resolves a CacheOnlyEncoder
+    pinned to whatever cache_key is already populated under cache/ -- for
+    machines (e.g. this one) that can never load real weights locally."""
+    if cache_only:
+        return resolve_cache_only(name)
     if name == "dinov2-s14":
         return DINOv2Encoder().load()
     if name == "vjepa2-vitl":
@@ -259,6 +264,15 @@ def main() -> None:
              "through the same encode_clips_cached batched path, per "
              "selected stack. Absent: byte-identical legacy behaviour.",
     )
+    parser.add_argument(
+        "--cache-only", action="store_true",
+        help="resolve pretrained stacks (dinov2-s14, vjepa2-vitl) to a "
+             "CacheOnlyEncoder against the already-populated cache/ dir "
+             "instead of loading real weights via .load() -- for machines "
+             "without network access to the model hubs (see "
+             "physics_auditor/models/pretrained.py). Local stacks "
+             "(raw-pixel, tiny-cnn-ae, tiny-cnn-pred) are unaffected.",
+    )
     args = parser.parse_args(sys.argv[1:])
     requested = [s.strip() for s in args.stacks.split(",")] if args.stacks else DEFAULT_STACKS
     unknown = set(requested) - set(ALL_STACK_NAMES)
@@ -298,7 +312,7 @@ def main() -> None:
     for name in PRETRAINED_STACKS:
         if name in plan:
             print(f"\nLoading pretrained {name} (real weights, GPU box only)...")
-            enc = _load_pretrained_encoder(name)
+            enc = _load_pretrained_encoder(name, cache_only=args.cache_only)
             print(f"  cache_key: {enc.cache_key}")
             stacks.append(enc)
 

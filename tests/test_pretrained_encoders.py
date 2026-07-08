@@ -9,7 +9,13 @@ import torch
 import torch.nn as nn
 
 from physics_auditor.models.cache import encode_clip_cached
-from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder, _device_plan
+from physics_auditor.models.pretrained import (
+    CacheOnlyEncoder,
+    DINOv2Encoder,
+    VJEPA2Encoder,
+    _device_plan,
+    resolve_cache_only,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -433,6 +439,81 @@ def test_dinov2_fp16_cpu_equivalent_path_casts_back_to_float32():
     assert z_half.dtype == np.float32
     assert z_full.dtype == np.float32
     np.testing.assert_allclose(z_half, z_full, rtol=1e-2, atol=1e-2)
+
+
+# --------------------------------------------------------- CacheOnlyEncoder
+
+def test_cache_only_encoder_satisfies_protocol_fields():
+    enc = CacheOnlyEncoder(name="dinov2-s14", cache_key="dinov2-s14-abcd1234")
+    assert enc.name == "dinov2-s14"
+    assert enc.cache_key == "dinov2-s14-abcd1234"
+
+
+def test_cache_only_encoder_encode_always_raises():
+    enc = CacheOnlyEncoder(name="dinov2-s14", cache_key="dinov2-s14-abcd1234")
+    clip = _fake_clip()
+    try:
+        enc.encode(clip)
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        msg = str(exc)
+        assert "dinov2-s14" in msg
+        assert "dinov2-s14-abcd1234" in msg
+        assert "deadbeef" in msg  # clip.config.scenario_id
+        assert "GPU box" in msg or "gpu box" in msg.lower()
+        assert "runbook" in msg
+
+
+def test_cache_only_encoder_encode_raises_without_scenario_id():
+    """A clip without a .config/.scenario_id must not crash message-building --
+    still raises RuntimeError, just without a scenario id in the message."""
+    enc = CacheOnlyEncoder(name="vjepa2-vitl", cache_key="vjepa2-vitl-abcd1234")
+
+    class _BareClip:
+        pass
+
+    try:
+        enc.encode(_BareClip())
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "vjepa2-vitl" in str(exc)
+
+
+# ------------------------------------------------------------ resolve_cache_only
+
+def test_resolve_cache_only_happy_path(tmp_path):
+    (tmp_path / "dinov2-s14-f390cdf2").mkdir()
+    enc = resolve_cache_only("dinov2-s14", cache_dir=str(tmp_path))
+    assert isinstance(enc, CacheOnlyEncoder)
+    assert enc.name == "dinov2-s14"
+    assert enc.cache_key == "dinov2-s14-f390cdf2"
+
+
+def test_resolve_cache_only_zero_matches_raises(tmp_path):
+    try:
+        resolve_cache_only("dinov2-s14", cache_dir=str(tmp_path))
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "dinov2-s14" in str(exc)
+
+
+def test_resolve_cache_only_multiple_matches_raises(tmp_path):
+    (tmp_path / "dinov2-s14-f390cdf2").mkdir()
+    (tmp_path / "dinov2-s14-74d24787").mkdir()
+    try:
+        resolve_cache_only("dinov2-s14", cache_dir=str(tmp_path))
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        msg = str(exc)
+        assert "dinov2-s14-f390cdf2" in msg
+        assert "dinov2-s14-74d24787" in msg
+
+
+def test_resolve_cache_only_ignores_other_stacks(tmp_path):
+    (tmp_path / "dinov2-s14-f390cdf2").mkdir()
+    (tmp_path / "vjepa2-vitl-d43ed1cb").mkdir()
+    enc = resolve_cache_only("dinov2-s14", cache_dir=str(tmp_path))
+    assert enc.cache_key == "dinov2-s14-f390cdf2"
 
 
 def test_device_plan_cpu_when_cuda_unavailable(monkeypatch):

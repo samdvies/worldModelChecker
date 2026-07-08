@@ -18,7 +18,7 @@ import torch
 from physics_auditor.laws import ALL_LAWS
 from physics_auditor.models.encoders import RawPixelEncoder, TinyCNNAE, TinyCNNPred
 from physics_auditor.models.predictor import load_predictor
-from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder
+from physics_auditor.models.pretrained import resolve_cache_only
 from physics_auditor.probes.mechanistic.decodability import PRIMARY_VARIABLE, decode_law_stack
 from physics_auditor.probes.mechanistic.intervention import run_intervention_law_stack
 from physics_auditor.report.verdict import is_decodable, is_voe_sensitive, verdict
@@ -57,9 +57,9 @@ def _load_encoder(name: str):
         enc.model.eval()
         return enc
     if name == "dinov2-s14":
-        return DINOv2Encoder().load()
+        return resolve_cache_only(name)
     if name == "vjepa2-vitl":
-        return VJEPA2Encoder().load()
+        return resolve_cache_only(name)
     raise ValueError(f"unknown stack {name}")
 
 
