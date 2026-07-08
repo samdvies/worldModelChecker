@@ -116,6 +116,12 @@ LAW_VARIABLES: dict[str, list[tuple[str, str, object]]] = {
     "permanence": [("permanence", "acc", L.permanence_label)],
     "solidity": [("ball_y", "r2", L.solidity_y), ("above_shelf", "acc", L.solidity_above_shelf)],
     "gravity": [("vy", "r2", L.gravity_vy)],
+    # Eval-only laws (see physics_auditor/laws/__init__.py): each reuses the
+    # base law's label function verbatim -- permanence-ext's violate clip
+    # deletes the "ball" body exactly like permanence; support-hard's Tower A
+    # (block0/block1/block2 + support edges) is identical to support's.
+    "permanence-ext": [("permanence", "acc", L.permanence_label)],
+    "support-hard": [("support", "acc", L.support_label)],
 }
 
 # The "primary" variable per law, used by report/verdict.py's decodable gate.
@@ -124,6 +130,8 @@ PRIMARY_VARIABLE: dict[str, str] = {
     "permanence": "permanence",
     "solidity": "ball_y",
     "gravity": "vy",
+    "permanence-ext": "permanence",
+    "support-hard": "support",
 }
 
 

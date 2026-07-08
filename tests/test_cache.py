@@ -127,6 +127,25 @@ def test_encode_clips_cached_uses_encode_batch_when_available(tmp_path):
         np.testing.assert_array_equal(z, np.full((3, 4), 9.0, dtype=np.float32))
 
 
+def test_encode_clips_cached_prints_flushed_progress_every_25_clips(tmp_path, capsys):
+    """Class K guard (host-OOM + 105-min silent log, docs/failure-sweeps.md):
+    encode_clips_cached must chunk its encode_batch calls (<=25 clips per
+    call) and print a flushed progress line after each chunk, so a mid-run
+    kill loses at most one chunk's worth of work and a stdout-buffered box
+    still shows visible progress."""
+    enc = _BatchEncoder()
+    clips = [_fake_clip(f"id{i:06d}") for i in range(30)]  # forces 2 chunks: 25 + 5
+
+    encode_clips_cached(enc, clips, cache_dir=str(tmp_path))
+
+    assert enc.encode_batch_calls == 2, "30 uncached clips at chunk size 25 must be 2 encode_batch calls"
+
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if "[cache]" in line]
+    assert f"  [cache] {enc.cache_key}: 25/30 uncached clips encoded" in lines
+    assert f"  [cache] {enc.cache_key}: 30/30 uncached clips encoded" in lines
+
+
 def test_encode_clips_cached_writes_to_same_paths_as_encode_clip_cached(tmp_path):
     enc = _CountingEncoder()
     clip = _fake_clip("deadbeef")

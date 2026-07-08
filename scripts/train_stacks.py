@@ -104,6 +104,31 @@ def _load_pretrained_encoder(name: str, cache_only: bool = False):
     raise ValueError(f"unknown pretrained stack {name}")
 
 
+CAUSAL_STACK_PREFIX = "vjepa2-vitl-causal"
+
+
+def _is_causal_stack(name: str) -> bool:
+    return name.startswith(CAUSAL_STACK_PREFIX)
+
+
+def voe_clips() -> list[Clip]:
+    """Clip set for --causal-scope voe: train clips + val clips + eval pairs
+    for permanence and permanence-ext ONLY (no other laws, no probe clips).
+    The pre-registered gate only needs causal permanence VoE + predictor
+    training, so this is the minimal clip set a causal stack (name starting
+    "vjepa2-vitl-causal") needs -- everything else would cost ~5h more GPU
+    time per causal stack for no gate-relevant benefit (see
+    docs/failure-sweeps.md class K)."""
+    clips: list[Clip] = []
+    clips.extend(train_clips())
+    clips.extend(val_clips())
+    for law_name in ("permanence", "permanence-ext"):
+        for pair in eval_pairs(law_name):
+            clips.append(pair.obey)
+            clips.append(pair.violate)
+    return clips
+
+
 def probe_clips() -> list[Clip]:
     """All Clips backing the mechanistic-probe latent caches: for every law
     in ALL_LAWS (all 6, including the eval-only laws -- they need
@@ -166,26 +191,47 @@ def load_or_train_pred(clips: list[Clip], force: bool = False) -> tuple[TinyCNNP
     return enc, losses, elapsed
 
 
-def populate_caches(stacks: list, force: bool = False, include_probe_caches: bool = False) -> dict[str, int]:
+def populate_caches(
+    stacks: list,
+    force: bool = False,
+    include_probe_caches: bool = False,
+    causal_scope: str = "voe",
+) -> dict[str, int]:
     """Populate the on-disk latent cache for train/val/eval clips (and, when
     include_probe_caches is set, the mechanistic-probe clips too -- see
     probe_clips()) across all given stacks. Returns {cache_key:
-    n_files_written_or_present}. Default (include_probe_caches=False)
-    behaviour is byte-identical to before this flag existed."""
+    n_files_written_or_present}.
+
+    causal_scope controls what CAUSAL stacks (name starting
+    "vjepa2-vitl-causal") get encoded for -- "voe" (default) restricts them
+    to voe_clips() (train + val + permanence/permanence-ext eval pairs only,
+    never probe clips even if include_probe_caches is set); "full" gives
+    them the same clip set as every other stack. Non-causal stacks always
+    get the full clip set regardless of causal_scope.
+
+    Default (include_probe_caches=False, causal_scope irrelevant to
+    non-causal stacks) behaviour for non-causal stacks is byte-identical to
+    before these flags existed."""
     counts: dict[str, int] = {}
 
-    all_clips: list[Clip] = []
-    all_clips.extend(train_clips())
-    all_clips.extend(val_clips())
+    full_clips: list[Clip] = []
+    full_clips.extend(train_clips())
+    full_clips.extend(val_clips())
     for law_name in ALL_LAWS:
         for pair in eval_pairs(law_name):
-            all_clips.append(pair.obey)
-            all_clips.append(pair.violate)
+            full_clips.append(pair.obey)
+            full_clips.append(pair.violate)
     if include_probe_caches:
-        all_clips.extend(probe_clips())
+        full_clips.extend(probe_clips())
+
+    scoped_clips = voe_clips() if causal_scope == "voe" else None
 
     for enc in stacks:
-        encode_clips_cached(enc, all_clips, cache_dir=str(CACHE_DIR))
+        if _is_causal_stack(enc.name) and causal_scope == "voe":
+            clips_for_stack = scoped_clips
+        else:
+            clips_for_stack = full_clips
+        encode_clips_cached(enc, clips_for_stack, cache_dir=str(CACHE_DIR))
 
     for enc in stacks:
         key_dir = CACHE_DIR / enc.cache_key
@@ -285,6 +331,15 @@ def main() -> None:
              "behaviour.",
     )
     parser.add_argument(
+        "--causal-scope", type=str, default="voe", choices=["voe", "full"],
+        help="scope of clips CAUSAL stacks (name starting 'vjepa2-vitl-causal') "
+             "are encoded/cached for: 'voe' (default) = train + val clips + "
+             "eval pairs for permanence and permanence-ext ONLY, never probe "
+             "clips even with --probe-caches (the pre-registered gate needs "
+             "nothing more); 'full' = everything (legacy behaviour). "
+             "Non-causal stacks are unaffected by this flag.",
+    )
+    parser.add_argument(
         "--cache-only", action="store_true",
         help="resolve pretrained stacks (dinov2-s14, vjepa2-vitl) to a "
              "CacheOnlyEncoder against the already-populated cache/ dir "
@@ -339,7 +394,9 @@ def main() -> None:
     probe_suffix = " + probe clips" if args.probe_caches else ""
     print(f"\nPopulating latent caches (train + val + eval clips{probe_suffix} x {len(stacks)} stack(s))...")
     t0 = time.time()
-    counts = populate_caches(stacks, include_probe_caches=args.probe_caches)
+    counts = populate_caches(
+        stacks, include_probe_caches=args.probe_caches, causal_scope=args.causal_scope
+    )
     print(f"  done in {time.time() - t0:.1f}s")
     for key, n in counts.items():
         print(f"  {key}: {n} cached files")

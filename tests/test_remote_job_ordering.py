@@ -167,6 +167,24 @@ def test_train_stacks_line_includes_causal_vjepa_window_sweep():
     assert not re.search(r"vjepa2-vitl-causal(?![\w-])", train_stacks_line_text)
 
 
+def test_train_stacks_line_uses_causal_scope_voe():
+    """Class K (see docs/failure-sweeps.md): dinov2-s14/vjepa2-vitl caches
+    are already complete and pre-seeded from S3 (resume), so the relaunch
+    only needs to make progress on the causal stacks -- scoped to `voe`
+    (train + val + permanence/permanence-ext eval pairs only) to fit the
+    420-min backstop; the plain stacks stay in --stacks anyway as a
+    cache-integrity check (cost ~0 once fully cached)."""
+    text = REMOTE_JOB.read_text(encoding="utf-8")
+    train_stacks_line_text = next(
+        line for line in text.splitlines() if re.search(r"train_stacks\.py --stacks", line)
+    )
+    assert "--causal-scope voe" in train_stacks_line_text
+    assert (
+        "--stacks dinov2-s14,vjepa2-vitl,vjepa2-vitl-causal-w16,vjepa2-vitl-causal-w32 "
+        "--probe-caches --causal-scope voe" in train_stacks_line_text
+    )
+
+
 def test_report_card_and_mechanistic_scripts_no_longer_invoked():
     """Class I: both scripts crash on the GPU box (FileNotFoundError on
     predictor weights never trained there) -- they must no longer be

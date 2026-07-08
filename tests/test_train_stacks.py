@@ -127,6 +127,158 @@ def test_probe_caches_flag_routes_probe_clips_into_encode_clips_cached(monkeypat
     )
 
 
+class _FakeEncoder:
+    def __init__(self, name):
+        self.name = name
+        self.cache_key = f"{name}-fakehash"
+
+
+def _patch_clip_sources(monkeypatch, train_stacks):
+    """Shared clip-source mocks for populate_caches causal-scope tests:
+    train_clips/val_clips/probe_clips return small, distinguishable fake
+    clip lists; eval_pairs(law_name) returns one MinimalPair per law whose
+    obey/violate values embed the law name so callers can assert exactly
+    which laws' eval clips were included."""
+    monkeypatch.setattr(train_stacks, "train_clips", lambda: ["train-1", "train-2"])
+    monkeypatch.setattr(train_stacks, "val_clips", lambda: ["val-1"])
+    monkeypatch.setattr(train_stacks, "probe_clips", lambda: ["probe-1", "probe-2"])
+
+    def fake_eval_pairs(law_name, seeds=None):
+        return [_FakePair(f"{law_name}-obey", f"{law_name}-violate")]
+
+    monkeypatch.setattr(train_stacks, "eval_pairs", fake_eval_pairs)
+
+
+def test_causal_scope_voe_encodes_train_val_and_permanence_pairs_only(monkeypatch, tmp_path):
+    """--causal-scope voe (default): a causal stack (name starting
+    "vjepa2-vitl-causal") must be encoded only against train + val clips
+    plus eval pairs for permanence and permanence-ext -- no other laws, and
+    NEVER probe clips even when include_probe_caches=True."""
+    import scripts.train_stacks as train_stacks
+
+    _patch_clip_sources(monkeypatch, train_stacks)
+    monkeypatch.setattr(train_stacks, "CACHE_DIR", tmp_path)
+
+    encode_calls = []
+
+    def fake_encode_clips_cached(enc, clips, cache_dir=None, **kwargs):
+        encode_calls.append((enc.name, list(clips)))
+        return [None] * len(clips)
+
+    monkeypatch.setattr(train_stacks, "encode_clips_cached", fake_encode_clips_cached)
+
+    causal_enc = _FakeEncoder("vjepa2-vitl-causal-w16")
+    train_stacks.populate_caches([causal_enc], include_probe_caches=True, causal_scope="voe")
+
+    assert len(encode_calls) == 1
+    name, clips = encode_calls[0]
+    assert name == "vjepa2-vitl-causal-w16"
+    assert clips == [
+        "train-1", "train-2", "val-1",
+        "permanence-obey", "permanence-violate",
+        "permanence-ext-obey", "permanence-ext-violate",
+    ]
+    assert "probe-1" not in clips and "probe-2" not in clips
+
+
+def test_causal_scope_full_preserves_legacy_behaviour(monkeypatch, tmp_path):
+    """--causal-scope full: a causal stack gets the SAME clip set as any
+    other stack -- train + val + eval pairs for every ALL_LAWS law (+ probe
+    clips when include_probe_caches=True)."""
+    import scripts.train_stacks as train_stacks
+
+    _patch_clip_sources(monkeypatch, train_stacks)
+    monkeypatch.setattr(train_stacks, "CACHE_DIR", tmp_path)
+
+    encode_calls = []
+
+    def fake_encode_clips_cached(enc, clips, cache_dir=None, **kwargs):
+        encode_calls.append((enc.name, list(clips)))
+        return [None] * len(clips)
+
+    monkeypatch.setattr(train_stacks, "encode_clips_cached", fake_encode_clips_cached)
+
+    causal_enc = _FakeEncoder("vjepa2-vitl-causal-w32")
+    train_stacks.populate_caches([causal_enc], include_probe_caches=True, causal_scope="full")
+
+    assert len(encode_calls) == 1
+    name, clips = encode_calls[0]
+    assert name == "vjepa2-vitl-causal-w32"
+    expected = ["train-1", "train-2", "val-1"]
+    for law_name in train_stacks.ALL_LAWS:
+        expected.append(f"{law_name}-obey")
+        expected.append(f"{law_name}-violate")
+    expected.extend(["probe-1", "probe-2"])
+    assert clips == expected
+
+
+def test_causal_scope_does_not_affect_non_causal_stacks(monkeypatch, tmp_path):
+    """A non-causal stack (e.g. dinov2-s14) must always get the full clip
+    set regardless of --causal-scope's value -- the flag only scopes stacks
+    whose name starts with "vjepa2-vitl-causal"."""
+    import scripts.train_stacks as train_stacks
+
+    _patch_clip_sources(monkeypatch, train_stacks)
+    monkeypatch.setattr(train_stacks, "CACHE_DIR", tmp_path)
+
+    encode_calls = []
+
+    def fake_encode_clips_cached(enc, clips, cache_dir=None, **kwargs):
+        encode_calls.append((enc.name, list(clips)))
+        return [None] * len(clips)
+
+    monkeypatch.setattr(train_stacks, "encode_clips_cached", fake_encode_clips_cached)
+
+    non_causal_enc = _FakeEncoder("dinov2-s14")
+    train_stacks.populate_caches([non_causal_enc], include_probe_caches=True, causal_scope="voe")
+
+    assert len(encode_calls) == 1
+    name, clips = encode_calls[0]
+    assert name == "dinov2-s14"
+    expected = ["train-1", "train-2", "val-1"]
+    for law_name in train_stacks.ALL_LAWS:
+        expected.append(f"{law_name}-obey")
+        expected.append(f"{law_name}-violate")
+    expected.extend(["probe-1", "probe-2"])
+    assert clips == expected
+
+
+def test_causal_scope_mixed_stacks_each_get_correct_clip_set(monkeypatch, tmp_path):
+    """One populate_caches call with both a causal and a non-causal stack:
+    each stack must see its own correctly-scoped clip set."""
+    import scripts.train_stacks as train_stacks
+
+    _patch_clip_sources(monkeypatch, train_stacks)
+    monkeypatch.setattr(train_stacks, "CACHE_DIR", tmp_path)
+
+    encode_calls = []
+
+    def fake_encode_clips_cached(enc, clips, cache_dir=None, **kwargs):
+        encode_calls.append((enc.name, list(clips)))
+        return [None] * len(clips)
+
+    monkeypatch.setattr(train_stacks, "encode_clips_cached", fake_encode_clips_cached)
+
+    causal_enc = _FakeEncoder("vjepa2-vitl-causal-w16")
+    non_causal_enc = _FakeEncoder("dinov2-s14")
+    train_stacks.populate_caches(
+        [non_causal_enc, causal_enc], include_probe_caches=True, causal_scope="voe"
+    )
+
+    by_name = dict(encode_calls)
+    assert by_name["vjepa2-vitl-causal-w16"] == [
+        "train-1", "train-2", "val-1",
+        "permanence-obey", "permanence-violate",
+        "permanence-ext-obey", "permanence-ext-violate",
+    ]
+    full_expected = ["train-1", "train-2", "val-1"]
+    for law_name in train_stacks.ALL_LAWS:
+        full_expected.append(f"{law_name}-obey")
+        full_expected.append(f"{law_name}-violate")
+    full_expected.extend(["probe-1", "probe-2"])
+    assert by_name["dinov2-s14"] == full_expected
+
+
 def test_probe_caches_flag_absent_does_not_touch_probe_clips(monkeypatch, tmp_path):
     """Default behaviour (no --probe-caches) must be byte-identical to
     before: encode_clips_cached must never see the probe clips."""

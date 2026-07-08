@@ -749,6 +749,123 @@ def test_causal_vjepa2_load_uses_same_hf_model_id_as_plain_stack():
     assert CausalVJEPA2Encoder.HF_MODEL_ID == VJEPA2Encoder.HF_MODEL_ID
 
 
+def test_causal_vjepa2_encode_batch_streams_windows_never_materialising_more_than_batch_size(monkeypatch):
+    """OOM regression guard (docs/failure-sweeps.md class K): the old
+    implementation built EVERY resized window for EVERY clip into
+    `flat_windows` up front before any forward call -- 128 train clips x 48
+    windows x 12.6MB ~= 77GB, host-OOM on the GPU box. `_encode_core_batch`
+    must instead walk (clip, frame) window pairs LAZILY, resizing only the
+    current chunk of <= batch_size windows before each forward, so the
+    number of resize calls made must climb in lockstep with forward calls,
+    never all up front."""
+    import physics_auditor.models.pretrained as pretrained_mod
+
+    resize_calls = {"n": 0}
+    real_resize = pretrained_mod._resize_and_normalize
+
+    def counting_resize(frames, size):
+        resize_calls["n"] += 1
+        return real_resize(frames, size)
+
+    monkeypatch.setattr(pretrained_mod, "_resize_and_normalize", counting_resize)
+
+    forward_snapshot = []
+
+    class _CountingMock(nn.Module):
+        def __init__(self, hidden_dim=4, num_spatial=2):
+            super().__init__()
+            self.hidden_dim = hidden_dim
+            self.num_spatial = num_spatial
+            self.proj = nn.Linear(3, hidden_dim)
+
+        def forward(self, pixel_values_videos: torch.Tensor, **kwargs):
+            forward_snapshot.append(resize_calls["n"])
+            b, t, c, h, w = pixel_values_videos.shape
+            num_temporal = max(t // 2, 1)
+            pooled = pixel_values_videos.mean(dim=[3, 4])
+            temporal_pooled = pooled[:, : num_temporal * 2 : 2]
+            tokens = self.proj(temporal_pooled)
+            tokens = tokens.repeat_interleave(self.num_spatial, dim=1)
+
+            class _Out:
+                pass
+
+            out = _Out()
+            out.last_hidden_state = tokens
+            return out
+
+    model = _CountingMock()
+    model.eval()
+    enc = CausalVJEPA2Encoder(model=model, window=4)
+    clips = [_fake_clip(t=3, seed=0), _fake_clip(t=4, seed=1), _fake_clip(t=2, seed=2)]  # 9 windows total
+    batch_size = 3
+
+    enc.encode_batch(clips, batch_size=batch_size)
+
+    total_windows = 9
+    assert resize_calls["n"] == total_windows
+    expected_snapshot = [min((k + 1) * batch_size, total_windows) for k in range(len(forward_snapshot))]
+    assert forward_snapshot == expected_snapshot, (
+        f"resize calls must climb in lockstep with forward calls (streaming), "
+        f"got {forward_snapshot}, expected {expected_snapshot} -- a non-streaming "
+        f"implementation would show {total_windows} resize calls before the FIRST forward"
+    )
+
+
+def test_causal_vjepa2_encode_streams_windows_never_materialising_more_than_batch_size(monkeypatch):
+    """Same OOM guard as above, for the single-clip `_encode_core` path
+    (`encode`/`.encode`'s own default_batch chunking) -- it used to build
+    `xs` for every frame of the clip up front (~1.2GB for w32x48 frames)."""
+    import physics_auditor.models.pretrained as pretrained_mod
+
+    resize_calls = {"n": 0}
+    real_resize = pretrained_mod._resize_and_normalize
+
+    def counting_resize(frames, size):
+        resize_calls["n"] += 1
+        return real_resize(frames, size)
+
+    monkeypatch.setattr(pretrained_mod, "_resize_and_normalize", counting_resize)
+
+    forward_snapshot = []
+
+    class _CountingMock(nn.Module):
+        def __init__(self, hidden_dim=4, num_spatial=2):
+            super().__init__()
+            self.hidden_dim = hidden_dim
+            self.num_spatial = num_spatial
+            self.proj = nn.Linear(3, hidden_dim)
+
+        def forward(self, pixel_values_videos: torch.Tensor, **kwargs):
+            forward_snapshot.append(resize_calls["n"])
+            b, t, c, h, w = pixel_values_videos.shape
+            num_temporal = max(t // 2, 1)
+            pooled = pixel_values_videos.mean(dim=[3, 4])
+            temporal_pooled = pooled[:, : num_temporal * 2 : 2]
+            tokens = self.proj(temporal_pooled)
+            tokens = tokens.repeat_interleave(self.num_spatial, dim=1)
+
+            class _Out:
+                pass
+
+            out = _Out()
+            out.last_hidden_state = tokens
+            return out
+
+    model = _CountingMock()
+    model.eval()
+    enc = CausalVJEPA2Encoder(model=model, window=4)
+    clip = _fake_clip(t=9, seed=7)  # 9 windows (one per frame)
+    batch_size = 3
+
+    enc._encode_core(clip, device="cpu", use_half=False, batch_size=batch_size)
+
+    total_windows = 9
+    assert resize_calls["n"] == total_windows
+    expected_snapshot = [min((k + 1) * batch_size, total_windows) for k in range(len(forward_snapshot))]
+    assert forward_snapshot == expected_snapshot
+
+
 def test_vjepa2_uses_run_backbone_hook_for_api_isolation():
     """Overriding _run_backbone alone (as a real API-mismatch fix would)
     changes encode()'s output -- confirms the reshaping/tubelet logic is

@@ -29,14 +29,26 @@ def encode_clip_cached(encoder: Encoder, clip: Clip, cache_dir: str = "cache") -
     return latents
 
 
+_PROGRESS_CHUNK_SIZE = 25
+
+
 def encode_clips_cached(
     encoder: Encoder, clips: list[Clip], cache_dir: str = "cache", batch_size: int | None = None
 ) -> list[np.ndarray]:
     """Batched counterpart of encode_clip_cached: loads already-cached clips
-    from disk, encodes the rest in one go (via encoder.encode_batch if
-    available, else falling back to per-clip encoder.encode), writes new
-    results to the same <cache_dir>/<cache_key>/<scenario_id>.npy paths, and
-    returns latents in the same order as the input `clips`."""
+    from disk, encodes the rest (via encoder.encode_batch if available, else
+    falling back to per-clip encoder.encode) in chunks of at most
+    `_PROGRESS_CHUNK_SIZE` clips, writes new results to the same
+    <cache_dir>/<cache_key>/<scenario_id>.npy paths, and returns latents in
+    the same order as the input `clips`.
+
+    Chunking (rather than one giant encode_batch call over every uncached
+    clip) is deliberate (docs/failure-sweeps.md class K): it bounds how much
+    work a mid-run kill can lose (<= one chunk), gives real resume
+    granularity (each chunk's files land on disk before the next chunk
+    starts), and lets a flushed progress line print after every chunk so a
+    stdout-buffered remote job still shows visible progress instead of
+    going silent for the whole call."""
     paths = [_cache_path(encoder, clip, cache_dir) for clip in clips]
     results: list[np.ndarray | None] = [None] * len(clips)
     uncached_idx = []
@@ -47,18 +59,26 @@ def encode_clips_cached(
         else:
             uncached_idx.append(i)
 
-    if uncached_idx:
+    total = len(uncached_idx)
+    if total:
         uncached_clips = [clips[i] for i in uncached_idx]
-        if hasattr(encoder, "encode_batch"):
-            new_latents = encoder.encode_batch(uncached_clips, batch_size=batch_size)
-        else:
-            new_latents = [encoder.encode(c) for c in uncached_clips]
+        for start in range(0, total, _PROGRESS_CHUNK_SIZE):
+            end = min(start + _PROGRESS_CHUNK_SIZE, total)
+            chunk_clips = uncached_clips[start:end]
+            chunk_idx = uncached_idx[start:end]
 
-        for idx, latents in zip(uncached_idx, new_latents):
-            latents = np.asarray(latents, dtype=np.float32)
-            key_dir, path = paths[idx]
-            os.makedirs(key_dir, exist_ok=True)
-            np.save(path, latents)
-            results[idx] = latents
+            if hasattr(encoder, "encode_batch"):
+                new_latents = encoder.encode_batch(chunk_clips, batch_size=batch_size)
+            else:
+                new_latents = [encoder.encode(c) for c in chunk_clips]
+
+            for idx, latents in zip(chunk_idx, new_latents):
+                latents = np.asarray(latents, dtype=np.float32)
+                key_dir, path = paths[idx]
+                os.makedirs(key_dir, exist_ok=True)
+                np.save(path, latents)
+                results[idx] = latents
+
+            print(f"  [cache] {encoder.cache_key}: {end}/{total} uncached clips encoded", flush=True)
 
     return results  # type: ignore[return-value]

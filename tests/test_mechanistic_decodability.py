@@ -158,3 +158,77 @@ def test_window_is_structurally_blind_on_real_gravity_pairs_is_false():
     enc = RawPixelEncoder()
     pairs = probe_pairs("gravity", "train", seeds=range(300, 302))
     assert window_is_structurally_blind(pairs, enc) is False
+
+
+# --- registry completeness guard: every law in ALL_LAWS (including the two
+# eval-only laws, permanence-ext and support-hard) must have an entry in both
+# LAW_VARIABLES and PRIMARY_VARIABLE, and PRIMARY_VARIABLE must name a
+# variable that's actually present in that law's LAW_VARIABLES list. This is
+# the standing guard that would have caught the KeyError('permanence-ext')
+# bug in scripts/run_mechanistic.py at commit time. -------------------------
+
+def test_every_law_has_law_variables_and_primary_variable_entries():
+    from physics_auditor.laws import ALL_LAWS
+    from physics_auditor.probes.mechanistic.decodability import LAW_VARIABLES, PRIMARY_VARIABLE
+
+    for law_name in ALL_LAWS:
+        assert law_name in LAW_VARIABLES, f"{law_name} missing from LAW_VARIABLES"
+        assert law_name in PRIMARY_VARIABLE, f"{law_name} missing from PRIMARY_VARIABLE"
+
+
+def test_primary_variable_names_a_variable_in_its_laws_variable_list():
+    from physics_auditor.laws import ALL_LAWS
+    from physics_auditor.probes.mechanistic.decodability import LAW_VARIABLES, PRIMARY_VARIABLE
+
+    for law_name in ALL_LAWS:
+        var_names = {v for v, _, _ in LAW_VARIABLES[law_name]}
+        assert PRIMARY_VARIABLE[law_name] in var_names, (
+            f"{law_name}: PRIMARY_VARIABLE {PRIMARY_VARIABLE[law_name]!r} not in {var_names}"
+        )
+
+
+def test_permanence_ext_reuses_permanence_label_and_primary_variable():
+    from physics_auditor.probes.mechanistic import labels as L
+    from physics_auditor.probes.mechanistic.decodability import LAW_VARIABLES, PRIMARY_VARIABLE
+
+    assert LAW_VARIABLES["permanence-ext"] == [("permanence", "acc", L.permanence_label)]
+    assert PRIMARY_VARIABLE["permanence-ext"] == "permanence"
+
+
+def test_support_hard_reuses_support_label_and_primary_variable():
+    from physics_auditor.probes.mechanistic import labels as L
+    from physics_auditor.probes.mechanistic.decodability import LAW_VARIABLES, PRIMARY_VARIABLE
+
+    assert LAW_VARIABLES["support-hard"] == [("support", "acc", L.support_label)]
+    assert PRIMARY_VARIABLE["support-hard"] == "support"
+
+
+# --- label-function validity on real generated pairs: confirms the two
+# reused label functions actually apply cleanly to the new laws' clips. ----
+
+def test_permanence_label_correct_on_permanence_ext_pairs():
+    from physics_auditor.laws.permanence_ext import PermanenceExtLaw
+    from physics_auditor.probes.mechanistic import labels as L
+
+    for seed in (0, 1):
+        pair = PermanenceExtLaw().generate_pair(seed)
+        cf = pair.critical_frame
+        for t in range(len(pair.obey.states)):
+            assert L.permanence_label(pair.obey.states[t]) is True, f"seed {seed} obey frame {t}"
+        for t in range(cf, len(pair.violate.states)):
+            assert L.permanence_label(pair.violate.states[t]) is False, f"seed {seed} violate frame {t}"
+
+
+def test_support_label_correct_before_critical_frame_on_support_hard_pairs():
+    """Tower A is intact (block2 supported) in both branches strictly before
+    critical_frame -- they're prefix-identical there by minimal-pair
+    discipline. Frame 0 itself has no contact arbiters yet (the physics
+    engine only populates support_edges after the first step, true for
+    every law, not a support-hard quirk), so frame 1 is used instead."""
+    from physics_auditor.laws.support_hard import SupportHardLaw
+    from physics_auditor.probes.mechanistic import labels as L
+
+    for seed in (0, 1):
+        pair = SupportHardLaw().generate_pair(seed)
+        assert L.support_label(pair.obey.states[1]) is True, f"seed {seed} obey frame 1"
+        assert L.support_label(pair.violate.states[1]) is True, f"seed {seed} violate frame 1"

@@ -406,24 +406,26 @@ class CausalVJEPA2Encoder:
         return hidden[:, : num_temporal * num_spatial].reshape(b, num_temporal, num_spatial, hidden_dim)
 
     def _encode_core(self, clip: Clip, device: str, use_half: bool, batch_size: int) -> np.ndarray:
-        """Device-agnostic encode core: builds every per-frame window for
-        this clip, then runs them through the backbone `batch_size` windows
-        at a time (all windows share the same length, so any grouping is a
-        real batched forward)."""
+        """Device-agnostic encode core: builds every per-frame window as
+        cheap raw uint8 arrays up front (`_build_windows`, small), but only
+        RESIZES/normalises (the expensive float32 (WINDOW,3,256,256) tensor
+        that caused the class-K OOM) `batch_size` windows at a time,
+        immediately before the forward that consumes them -- never more than
+        one chunk's worth of resized tensors live at once."""
         model = self._require_model()
         model.eval()
         model.to(device)
 
         frames = clip.frames
         t = frames.shape[0]
-        windows = self._build_windows(frames)  # (T, WINDOW, 64, 64, 3)
-        xs = [_resize_and_normalize(windows[i], self.INPUT_SIZE) for i in range(t)]  # each (WINDOW,3,256,256)
+        windows = self._build_windows(frames)  # (T, WINDOW, 64, 64, 3) -- cheap uint8, not resized
 
         outputs: list[np.ndarray] = [None] * t  # type: ignore[list-item]
         i = 0
         while i < t:
             j = min(i + batch_size, t)
-            x = torch.stack(xs[i:j], dim=0).to(device)  # (b, WINDOW, 3, 256, 256)
+            xs = [_resize_and_normalize(windows[k], self.INPUT_SIZE) for k in range(i, j)]  # each (WINDOW,3,256,256)
+            x = torch.stack(xs, dim=0).to(device)  # (b, WINDOW, 3, 256, 256)
             if use_half:
                 model.half()
                 x = x.half()
@@ -448,31 +450,40 @@ class CausalVJEPA2Encoder:
     def _encode_core_batch(
         self, clips: list[Clip], device: str, use_half: bool, batch_size: int
     ) -> list[np.ndarray]:
-        """Device-agnostic multi-clip batched encode core: every window
-        across EVERY clip is flattened into one list (windows are always
+        """Device-agnostic multi-clip batched encode core: builds every raw
+        (cheap, uint8) window across EVERY clip up front (windows are always
         WINDOW frames regardless of the owning clip's T, so unlike
-        VJEPA2Encoder there is no same-T grouping constraint), chunked into
-        groups of at most `batch_size`, run through the backbone, then
-        scattered back into per-clip (T, hidden) arrays."""
+        VJEPA2Encoder there is no same-T grouping constraint), but only
+        resizes/normalises -- the expensive float32 (WINDOW,3,256,256)
+        tensor that caused the class-K host-OOM (128 train clips x 48
+        windows x 12.6MB ~= 77GB) -- `batch_size` windows at a time, walking
+        (clip, frame) index pairs lazily, immediately before the forward
+        that consumes them, then scattered back into per-clip (T, hidden)
+        arrays."""
         model = self._require_model()
         model.eval()
         model.to(device)
 
-        flat_windows: list[torch.Tensor] = []
+        clip_windows: list[np.ndarray] = []  # per-clip (t, WINDOW, 64, 64, 3) raw uint8
         clip_lengths: list[int] = []
-        for c in clips:
+        flat_index: list[tuple[int, int]] = []  # (clip_idx, frame_idx) pairs, no tensors yet
+        for ci, c in enumerate(clips):
             frames = c.frames
             t = frames.shape[0]
             clip_lengths.append(t)
-            windows = self._build_windows(frames)
-            flat_windows.extend(_resize_and_normalize(windows[i], self.INPUT_SIZE) for i in range(t))
+            clip_windows.append(self._build_windows(frames))
+            flat_index.extend((ci, fi) for fi in range(t))
 
-        n = len(flat_windows)
+        n = len(flat_index)
         flat_outputs: list[np.ndarray] = [None] * n  # type: ignore[list-item]
         i = 0
         while i < n:
             j = min(i + batch_size, n)
-            x = torch.stack(flat_windows[i:j], dim=0).to(device)
+            xs = [
+                _resize_and_normalize(clip_windows[ci][fi], self.INPUT_SIZE)
+                for ci, fi in flat_index[i:j]
+            ]
+            x = torch.stack(xs, dim=0).to(device)
             if use_half:
                 model.half()
                 x = x.half()

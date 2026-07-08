@@ -152,8 +152,8 @@ z = enc.encode(clip)
 print('vjepa2-vitl smoke:', z.shape, z.dtype)
 "
 
-log_elapsed "== populate latent caches: train(100..131)/val(200..207)/eval(0..15, all 4 laws) + probe caches (train 300..331/test 400..415) =="
-uv run python scripts/train_stacks.py --stacks dinov2-s14,vjepa2-vitl,vjepa2-vitl-causal-w16,vjepa2-vitl-causal-w32 --probe-caches
+log_elapsed "== populate latent caches: dinov2-s14/vjepa2-vitl are already fully cached (cost ~0, cache-integrity check only); causal stacks (w16/w32) scoped to --causal-scope voe (train/val + permanence + permanence-ext eval pairs only, no probe caches) to fit the 420-min backstop =="
+uv run python scripts/train_stacks.py --stacks dinov2-s14,vjepa2-vitl,vjepa2-vitl-causal-w16,vjepa2-vitl-causal-w32 --probe-caches --causal-scope voe
 
 log_elapsed "== stop partial-sync loop + push final cache-partial sync =="
 stop_partial_sync_loop
