@@ -114,6 +114,13 @@ export PATH="$HOME/.local/bin:$PATH"
 log_elapsed "== uv sync --group gpu =="
 uv sync --group gpu
 
+log_elapsed "== cuda gate (class I): refuse to run on CPU wheels =="
+uv run python -c "
+import torch
+assert torch.cuda.is_available(), f'CUDA unavailable -- torch {torch.__version__} is a CPU wheel; see docs/failure-sweeps.md class I'
+print('cuda OK:', torch.__version__, torch.cuda.get_device_name(0))
+"
+
 log_elapsed "== pytest -m smoke (fast torch-free pre-flight -- fail fast in seconds, not minutes) =="
 uv run pytest -m smoke -q tests/test_smoke.py
 
@@ -143,21 +150,15 @@ z = enc.encode(clip)
 print('vjepa2-vitl smoke:', z.shape, z.dtype)
 "
 
-log_elapsed "== populate latent caches: train(100..131)/val(200..207)/eval(0..15, all 4 laws) =="
-uv run python scripts/train_stacks.py --stacks dinov2-s14,vjepa2-vitl
-
-log_elapsed "== populate probe latent caches: probe-train(300..331)/probe-test(400..415) via mechanistic run =="
-uv run python scripts/run_report_card.py --stacks dinov2-s14,vjepa2-vitl
-uv run python scripts/run_mechanistic.py --stacks dinov2-s14,vjepa2-vitl
+log_elapsed "== populate latent caches: train(100..131)/val(200..207)/eval(0..15, all 4 laws) + probe caches (train 300..331/test 400..415) =="
+uv run python scripts/train_stacks.py --stacks dinov2-s14,vjepa2-vitl --probe-caches
 
 log_elapsed "== stop partial-sync loop + push final cache-partial sync =="
 stop_partial_sync_loop
 
 log_elapsed "== tar cache/ + logs, upload to S3 =="
 tar -czf "$WORKDIR/cache.tar.gz" -C "$REPO_DIR" cache
-tar -czf "$WORKDIR/artifacts.tar.gz" -C "$REPO_DIR" artifacts
 aws s3 cp "$WORKDIR/cache.tar.gz" "s3://${BUCKET}/results/cache.tar.gz" --region "$REGION"
-aws s3 cp "$WORKDIR/artifacts.tar.gz" "s3://${BUCKET}/results/artifacts.tar.gz" --region "$REGION"
 upload_log
 
 log_elapsed "== done -- shutting down (spot terminates via instance-initiated-shutdown-behavior=terminate) =="

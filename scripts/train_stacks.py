@@ -13,6 +13,7 @@ predict-last-latent baseline (val MSE of just repeating z[t] as z[t+1]).
 Usage: uv run python scripts/train_stacks.py [--force] [--predictors]
 """
 import argparse
+import sys
 import time
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from physics_auditor.models.predictor import (
     save_predictor,
 )
 from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder
+from physics_auditor.probes.mechanistic.data import probe_pairs
 
 ROOT = Path(__file__).resolve().parent.parent
 WEIGHTS_DIR = ROOT / "artifacts" / "weights"
@@ -79,6 +81,25 @@ def _load_pretrained_encoder(name: str):
     raise ValueError(f"unknown pretrained stack {name}")
 
 
+def probe_clips() -> list[Clip]:
+    """All Clips backing the mechanistic-probe latent caches: for every law
+    in ALL_LAWS, for both splits ("train": seeds 300..331, "test": seeds
+    400..415), every pair's obey + violate clip. Pure fan-out, no encoding
+    -- this is the single source of truth for what --probe-caches warms.
+    Expected count: 4 laws x (32 + 16) seeds x 2 clips = 384 (see
+    docs/failure-sweeps.md class I: this replaces run_report_card.py/
+    run_mechanistic.py as the way remote_job.sh warms these caches, since
+    both scripts crash on the GPU box with FileNotFoundError on predictor
+    weights that are never trained there)."""
+    clips: list[Clip] = []
+    for law_name in ALL_LAWS:
+        for split in ("train", "test"):
+            for pair in probe_pairs(law_name, split):
+                clips.append(pair.obey)
+                clips.append(pair.violate)
+    return clips
+
+
 def _all_frames(clips: list[Clip]) -> np.ndarray:
     """Concatenate every clip's frames into one (N, 64, 64, 3) float32 [0,1] array."""
     return np.concatenate([c.frames for c in clips], axis=0).astype(np.float32) / 255.0
@@ -121,9 +142,12 @@ def load_or_train_pred(clips: list[Clip], force: bool = False) -> tuple[TinyCNNP
     return enc, losses, elapsed
 
 
-def populate_caches(stacks: list, force: bool = False) -> dict[str, int]:
-    """Populate the on-disk latent cache for train/val/eval clips across all
-    given stacks. Returns {cache_key: n_files_written_or_present}."""
+def populate_caches(stacks: list, force: bool = False, include_probe_caches: bool = False) -> dict[str, int]:
+    """Populate the on-disk latent cache for train/val/eval clips (and, when
+    include_probe_caches is set, the mechanistic-probe clips too -- see
+    probe_clips()) across all given stacks. Returns {cache_key:
+    n_files_written_or_present}. Default (include_probe_caches=False)
+    behaviour is byte-identical to before this flag existed."""
     counts: dict[str, int] = {}
 
     all_clips: list[Clip] = []
@@ -133,6 +157,8 @@ def populate_caches(stacks: list, force: bool = False) -> dict[str, int]:
         for pair in eval_pairs(law_name):
             all_clips.append(pair.obey)
             all_clips.append(pair.violate)
+    if include_probe_caches:
+        all_clips.extend(probe_clips())
 
     for enc in stacks:
         encode_clips_cached(enc, all_clips, cache_dir=str(CACHE_DIR))
@@ -226,7 +252,14 @@ def main() -> None:
              f"Pass e.g. 'dinov2-s14,vjepa2-vitl' to add the pretrained "
              f"stacks WITHOUT retraining/recomputing the existing three.",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--probe-caches", action="store_true",
+        help="also warm the mechanistic-probe latent caches (probe_clips(): "
+             "4 laws x train(300-331)+test(400-415) seeds x 2 clips = 384) "
+             "through the same encode_clips_cached batched path, per "
+             "selected stack. Absent: byte-identical legacy behaviour.",
+    )
+    args = parser.parse_args(sys.argv[1:])
     requested = [s.strip() for s in args.stacks.split(",")] if args.stacks else DEFAULT_STACKS
     unknown = set(requested) - set(ALL_STACK_NAMES)
     if unknown:
@@ -269,9 +302,10 @@ def main() -> None:
             print(f"  cache_key: {enc.cache_key}")
             stacks.append(enc)
 
-    print(f"\nPopulating latent caches (train + val + eval clips x {len(stacks)} stack(s))...")
+    probe_suffix = " + probe clips" if args.probe_caches else ""
+    print(f"\nPopulating latent caches (train + val + eval clips{probe_suffix} x {len(stacks)} stack(s))...")
     t0 = time.time()
-    counts = populate_caches(stacks)
+    counts = populate_caches(stacks, include_probe_caches=args.probe_caches)
     print(f"  done in {time.time() - t0:.1f}s")
     for key, n in counts.items():
         print(f"  {key}: {n} cached files")

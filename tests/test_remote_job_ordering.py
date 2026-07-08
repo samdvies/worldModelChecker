@@ -119,6 +119,50 @@ def test_stop_partial_sync_loop_called_in_on_error_and_success_path():
     assert success_path_calls[-1] < shutdown_now_line
 
 
+def test_cuda_gate_after_uv_sync_and_before_train_stacks():
+    """Class I (see docs/failure-sweeps.md): pyproject.toml used to pin the
+    CPU torch wheel index globally, so `uv sync --group gpu` on the GPU box
+    silently installed torch==X+cpu and encoding fell back to CPU (~20x
+    slower). remote_job.sh must fail fast (seconds, not hours) if torch
+    resolved a CPU wheel, right after `uv sync --group gpu` and before any
+    encoding work starts."""
+    text = REMOTE_JOB.read_text(encoding="utf-8")
+    uv_sync_line = _line_of(r"uv sync --group gpu", text)
+    cuda_gate_line = _line_of(r"torch\.cuda\.is_available\(\)", text)
+    train_stacks_line = _line_of(r"train_stacks\.py --stacks", text)
+    assert uv_sync_line < cuda_gate_line < train_stacks_line
+
+
+def test_train_stacks_line_uses_probe_caches_flag():
+    """Class I: run_report_card.py/run_mechanistic.py (previously used to
+    warm the mechanistic-probe latent caches) crash on the GPU box with
+    FileNotFoundError -- predictor weights are never trained there. The
+    probe caches are now warmed via train_stacks.py --probe-caches
+    instead."""
+    text = REMOTE_JOB.read_text(encoding="utf-8")
+    train_stacks_line_text = next(
+        line for line in text.splitlines() if re.search(r"train_stacks\.py --stacks", line)
+    )
+    assert "--probe-caches" in train_stacks_line_text
+
+
+def test_report_card_and_mechanistic_scripts_no_longer_invoked():
+    """Class I: both scripts crash on the GPU box (FileNotFoundError on
+    predictor weights never trained there) -- they must no longer be
+    invoked from remote_job.sh."""
+    text = REMOTE_JOB.read_text(encoding="utf-8")
+    assert "run_report_card.py" not in text
+    assert "run_mechanistic.py" not in text
+
+
+def test_artifacts_tar_no_longer_produced_or_uploaded():
+    """Class I: nothing on the box produces artifacts/ any more (predictor
+    training/report-card/mechanistic steps were removed), so the
+    artifacts.tar.gz tar+upload is dead weight -- must be removed."""
+    text = REMOTE_JOB.read_text(encoding="utf-8")
+    assert "artifacts.tar.gz" not in text
+
+
 def test_no_unguarded_var_expansion_under_set_u():
     """Every shell script that may run remotely (under `set -u`) must guard
     variable expansions that are not parameters/locals with a default
