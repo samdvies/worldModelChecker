@@ -4,11 +4,27 @@ hit torch.hub / HuggingFace) is never called in this suite."""
 from dataclasses import dataclass
 
 import numpy as np
+import pytest
 import torch
 import torch.nn as nn
 
 from physics_auditor.models.cache import encode_clip_cached
 from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder, _device_plan
+
+
+@pytest.fixture(autouse=True)
+def _pin_cpu_device_plan(monkeypatch):
+    """These tests pin the CPU code path with cpu-tensor mocks (device=
+    'cpu', use_half=False) and previously FAILED on the real GPU box
+    (docs/failure-sweeps.md class J) because `_device_plan`'s sole
+    `torch.cuda.is_available()` check returned True there, routing mocked
+    CPU tensors through the cuda+fp16 branch -- device-mismatch
+    RuntimeErrors and wrong-device assertions. The real cuda path is
+    exercised separately by remote_job.sh's fail-fast cuda gate plus its
+    on-box one-clip DINOv2/V-JEPA-2 encoder smokes, never by this suite.
+    Any test that needs is_available()==True patches it itself (via
+    monkeypatch/mock), which simply overrides this autouse default."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
 
 @dataclass
@@ -417,6 +433,18 @@ def test_dinov2_fp16_cpu_equivalent_path_casts_back_to_float32():
     assert z_half.dtype == np.float32
     assert z_full.dtype == np.float32
     np.testing.assert_allclose(z_half, z_full, rtol=1e-2, atol=1e-2)
+
+
+def test_device_plan_cpu_when_cuda_unavailable(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    device, use_half, default_batch = _device_plan(default_cpu_batch=1, default_cuda_batch=4)
+    assert (device, use_half, default_batch) == ("cpu", False, 1)
+
+
+def test_device_plan_cuda_fp16_when_cuda_available(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    device, use_half, default_batch = _device_plan(default_cpu_batch=1, default_cuda_batch=4)
+    assert (device, use_half, default_batch) == ("cuda", True, 4)
 
 
 def test_vjepa2_uses_run_backbone_hook_for_api_isolation():
