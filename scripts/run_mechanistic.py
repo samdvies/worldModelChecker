@@ -36,9 +36,14 @@ PREDICTOR_WEIGHTS = {
     "tiny-cnn-pred": WEIGHTS_DIR / "predictor_tiny-cnn-pred.pt",
     "dinov2-s14": WEIGHTS_DIR / "predictor_dinov2-s14.pt",
     "vjepa2-vitl": WEIGHTS_DIR / "predictor_vjepa2-vitl.pt",
+    "vjepa2-vitl-causal-w16": WEIGHTS_DIR / "predictor_vjepa2-vitl-causal-w16.pt",
+    "vjepa2-vitl-causal-w32": WEIGHTS_DIR / "predictor_vjepa2-vitl-causal-w32.pt",
 }
 DEFAULT_STACKS = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
-PRETRAINED_STACKS = ["dinov2-s14", "vjepa2-vitl"]
+# vjepa2-vitl-causal-w16/-w32 (memory-horizon sweep, see models/pretrained.py)
+# stay opt-in-only (never in DEFAULT_STACKS): encodes are ~16x the plain
+# stack's per-clip cost per window setting (48 windows vs 1 forward/clip).
+PRETRAINED_STACKS = ["dinov2-s14", "vjepa2-vitl", "vjepa2-vitl-causal-w16", "vjepa2-vitl-causal-w32"]
 ALL_STACK_NAMES = DEFAULT_STACKS + PRETRAINED_STACKS
 STACK_NAMES = DEFAULT_STACKS  # default kept for backward-compat callers
 
@@ -59,6 +64,8 @@ def _load_encoder(name: str):
     if name == "dinov2-s14":
         return resolve_cache_only(name)
     if name == "vjepa2-vitl":
+        return resolve_cache_only(name)
+    if name in ("vjepa2-vitl-causal-w16", "vjepa2-vitl-causal-w32"):
         return resolve_cache_only(name)
     raise ValueError(f"unknown stack {name}")
 

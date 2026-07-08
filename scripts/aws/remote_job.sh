@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs ON the GPU box (invoked by EC2 user-data). Defensive: any failure
-# uploads the log to S3 before shutdown, and a hard 240-minute shutdown
+# uploads the log to S3 before shutdown, and a hard 420-minute shutdown
 # backstop is scheduled at the very start regardless of outcome, so a wedged
 # job can never burn spot-instance money indefinitely.
 set -euo pipefail
@@ -26,8 +26,10 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 # `set -u` script WITHOUT firing the ERR trap, so if BUCKET is unset/empty
 # and this check ran before the trap/backstop existed, the instance would
 # keep running with no automatic shutdown and no log ever reaching S3.
-echo "== cost backstop: hard shutdown scheduled at +240 min regardless of outcome =="
-sudo shutdown -h +240 || true
+# 420 min: the causal window sweep (w16+w32) + n=64 eval seeds + 2 new
+# eval-only laws roughly triple the encode work vs the old 240-min budget.
+echo "== cost backstop: hard shutdown scheduled at +420 min regardless of outcome =="
+sudo shutdown -h +420 || true
 
 upload_log() {
     aws s3 cp "$LOG_FILE" "s3://${BUCKET:-unknown-bucket}/results/remote_job.log" --region "$REGION" || true
@@ -151,7 +153,7 @@ print('vjepa2-vitl smoke:', z.shape, z.dtype)
 "
 
 log_elapsed "== populate latent caches: train(100..131)/val(200..207)/eval(0..15, all 4 laws) + probe caches (train 300..331/test 400..415) =="
-uv run python scripts/train_stacks.py --stacks dinov2-s14,vjepa2-vitl --probe-caches
+uv run python scripts/train_stacks.py --stacks dinov2-s14,vjepa2-vitl,vjepa2-vitl-causal-w16,vjepa2-vitl-causal-w32 --probe-caches
 
 log_elapsed "== stop partial-sync loop + push final cache-partial sync =="
 stop_partial_sync_loop

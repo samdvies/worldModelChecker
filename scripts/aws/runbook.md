@@ -18,14 +18,27 @@ itself. Run every step below **from the laptop** unless marked otherwise.
   this as a rough **~5-8x** combined speedup estimate, not a measured
   number, until confirmed against a real T4 run. DINOv2 is comparatively
   cheap (ViT-S, already frame-batched) and was not the bottleneck.
-- Expected total job time: **1-3 hours** on a *resumed* run picking up from
-  a prior `cache-partial/` sync (see Resume semantics below); a cold run
-  with no partial cache and the old fp32/unbatched V-JEPA-2 path could take
-  10+ hours -- always check whether `s3://physics-auditor-<account>/results/cache-partial/`
+- **`vjepa2-vitl-causal-w16` / `-w32` (CausalVJEPA2Encoder memory-horizon
+  sweep, fixes the non-causal-latency confound):** each windowed stack runs
+  one window forward per FRAME (48 windows for a 48-frame clip) instead of
+  one forward per clip, so the w16+w32 sweep together costs roughly **~3x**
+  the plain `vjepa2-vitl` stack per clip in wall-clock terms once window
+  batching (`DEFAULT_CUDA_BATCH_SIZE=8` vs the plain stack's whole-clip
+  batch of 4) claws back most of the raw per-window multiplier -- budget
+  the cache-warm step accordingly when `--stacks` includes them. Both are
+  opt-in only (never in any DEFAULT_STACKS list) precisely because of this
+  cost. w16 is the negative control (window < occlusion), w32 the fair
+  test (window >= occlusion) -- see the class docstring in
+  `physics_auditor/models/pretrained.py`.
+- Expected total job time: **~3-5 hours** for a run including the causal
+  w16+w32 sweep, the n=64 eval seeds, and the 2 new eval-only laws; a
+  *resumed* run picking up from a prior `cache-partial/` sync (see Resume
+  semantics below) is correspondingly cheaper -- always check whether
+  `s3://physics-auditor-<account>/results/cache-partial/`
   already has content before assuming a fresh multi-hour budget.
-- Expected cost per run: **roughly $0.20-1.60** for a resumed/fp16-batched
-  run; budget more for a cold run against the old (fixed) per-clip cost.
-- Hard backstop: `remote_job.sh` schedules `sudo shutdown -h +240` (4h) at
+- Expected cost per run: **roughly $0.50-2.70** at spot pricing for a
+  3-5 h fp16-batched run; less on a resumed run.
+- Hard backstop: `remote_job.sh` schedules `sudo shutdown -h +420` (7h) at
   the very start, so a wedged job cannot run away with cost.
 
 ## Resume semantics + cache-partial layout (class G)

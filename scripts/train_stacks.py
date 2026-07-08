@@ -32,7 +32,12 @@ from physics_auditor.models.predictor import (
     load_predictor,
     save_predictor,
 )
-from physics_auditor.models.pretrained import DINOv2Encoder, VJEPA2Encoder, resolve_cache_only
+from physics_auditor.models.pretrained import (
+    CausalVJEPA2Encoder,
+    DINOv2Encoder,
+    VJEPA2Encoder,
+    resolve_cache_only,
+)
 from physics_auditor.probes.mechanistic.data import probe_pairs
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,12 +52,21 @@ PREDICTOR_WEIGHTS = {
     "tiny-cnn-pred": WEIGHTS_DIR / "predictor_tiny-cnn-pred.pt",
     "dinov2-s14": WEIGHTS_DIR / "predictor_dinov2-s14.pt",
     "vjepa2-vitl": WEIGHTS_DIR / "predictor_vjepa2-vitl.pt",
+    "vjepa2-vitl-causal-w16": WEIGHTS_DIR / "predictor_vjepa2-vitl-causal-w16.pt",
+    "vjepa2-vitl-causal-w32": WEIGHTS_DIR / "predictor_vjepa2-vitl-causal-w32.pt",
 }
 # The 3 from-scratch stacks are trained/populated by default (unchanged
-# behaviour); the 2 pretrained stacks are opt-in via --stacks since their
-# real weights only load on the GPU box (see models/pretrained.py).
+# behaviour); the pretrained stacks are opt-in via --stacks since their real
+# weights only load on the GPU box (see models/pretrained.py).
+# vjepa2-vitl-causal-w16/-w32 in particular must stay opt-in-only (never
+# added to DEFAULT_STACKS): each is ~16x the per-clip cost of the plain
+# stack (48 windows vs 1 forward per clip). w16's memory window (16 frames)
+# is SHORTER than the ~20-26 frame occlusion length used by the permanence
+# laws -- an intentional negative control that cannot possibly carry the
+# memory. w32's window (32 frames) is the fair test, since it is >= the
+# occlusion length.
 DEFAULT_STACKS = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
-PRETRAINED_STACKS = ["dinov2-s14", "vjepa2-vitl"]
+PRETRAINED_STACKS = ["dinov2-s14", "vjepa2-vitl", "vjepa2-vitl-causal-w16", "vjepa2-vitl-causal-w32"]
 ALL_STACK_NAMES = DEFAULT_STACKS + PRETRAINED_STACKS
 
 
@@ -83,19 +97,24 @@ def _load_pretrained_encoder(name: str, cache_only: bool = False):
         return DINOv2Encoder().load()
     if name == "vjepa2-vitl":
         return VJEPA2Encoder().load()
+    if name == "vjepa2-vitl-causal-w16":
+        return CausalVJEPA2Encoder(window=16).load()
+    if name == "vjepa2-vitl-causal-w32":
+        return CausalVJEPA2Encoder(window=32).load()
     raise ValueError(f"unknown pretrained stack {name}")
 
 
 def probe_clips() -> list[Clip]:
     """All Clips backing the mechanistic-probe latent caches: for every law
-    in ALL_LAWS, for both splits ("train": seeds 300..331, "test": seeds
-    400..415), every pair's obey + violate clip. Pure fan-out, no encoding
-    -- this is the single source of truth for what --probe-caches warms.
-    Expected count: 4 laws x (32 + 16) seeds x 2 clips = 384 (see
-    docs/failure-sweeps.md class I: this replaces run_report_card.py/
-    run_mechanistic.py as the way remote_job.sh warms these caches, since
-    both scripts crash on the GPU box with FileNotFoundError on predictor
-    weights that are never trained there)."""
+    in ALL_LAWS (all 6, including the eval-only laws -- they need
+    mechanistic probe latents too), for both splits ("train": seeds
+    300..331, "test": seeds 400..415), every pair's obey + violate clip.
+    Pure fan-out, no encoding -- this is the single source of truth for
+    what --probe-caches warms. Expected count: 6 laws x (32 + 16) seeds x 2
+    clips = 576 (see docs/failure-sweeps.md class I: this replaces
+    run_report_card.py/run_mechanistic.py as the way remote_job.sh warms
+    these caches, since both scripts crash on the GPU box with
+    FileNotFoundError on predictor weights that are never trained there)."""
     clips: list[Clip] = []
     for law_name in ALL_LAWS:
         for split in ("train", "test"):
@@ -260,9 +279,10 @@ def main() -> None:
     parser.add_argument(
         "--probe-caches", action="store_true",
         help="also warm the mechanistic-probe latent caches (probe_clips(): "
-             "4 laws x train(300-331)+test(400-415) seeds x 2 clips = 384) "
-             "through the same encode_clips_cached batched path, per "
-             "selected stack. Absent: byte-identical legacy behaviour.",
+             "6 laws (ALL_LAWS) x train(300-331)+test(400-415) seeds x 2 "
+             "clips = 576) through the same encode_clips_cached batched "
+             "path, per selected stack. Absent: byte-identical legacy "
+             "behaviour.",
     )
     parser.add_argument(
         "--cache-only", action="store_true",
@@ -279,7 +299,7 @@ def main() -> None:
     if unknown:
         raise ValueError(f"unknown stack(s) {sorted(unknown)}, choose from {ALL_STACK_NAMES}")
 
-    print("Building lawful train clips (seeds 100-132, all 4 laws)...")
+    print("Building lawful train clips (seeds 100-132, the 4 TRAIN_LAWS)...")
     train = list(train_clips())
     print(f"  {len(train)} clips, {sum(c.frames.shape[0] for c in train)} frames")
 

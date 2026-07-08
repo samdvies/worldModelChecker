@@ -41,7 +41,7 @@ marker delivers the "they were the same until *just now*" beat that no static fi
 
 ## Honesty constraint
 
-The gallery must carry the same caveats as the report card (n=16 pairs, degenerate-score
+The gallery must carry the same caveats as the report card (n=64 pairs, degenerate-score
 cells, pinned thresholds) — it is a scientific artifact, not a sales page. Numbers shown on
 screen come from the same JSONs the writeup cites.
 

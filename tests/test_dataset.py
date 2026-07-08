@@ -27,5 +27,11 @@ def test_eval_pairs_returns_minimal_pairs_for_named_law():
 
 def test_train_and_eval_seed_ranges_are_scene_disjoint():
     train = {c.config.seed for c in train_clips(seeds=range(100, 132))}
-    eval_seeds = set(range(0, 16))
+    eval_seeds = set(range(0, 64))
     assert train.isdisjoint(eval_seeds)
+
+
+def test_eval_pairs_default_seed_range_is_64():
+    pairs = eval_pairs("gravity")
+    assert len(pairs) == 64
+    assert {p.obey.config.seed for p in pairs} == set(range(0, 64))

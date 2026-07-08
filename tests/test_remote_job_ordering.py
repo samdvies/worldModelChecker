@@ -46,7 +46,7 @@ def test_trap_and_backstop_precede_the_bucket_check():
     text = REMOTE_JOB.read_text(encoding="utf-8")
 
     trap_line = _line_of(r"trap\s+on_error\s+ERR", text)
-    shutdown_line = _line_of(r"shutdown -h \+240", text)
+    shutdown_line = _line_of(r"shutdown -h \+420", text)
     bucket_check_line = _line_of(r'-z\s+"\$\{BUCKET:-', text)
 
     assert trap_line < bucket_check_line, (
@@ -144,6 +144,27 @@ def test_train_stacks_line_uses_probe_caches_flag():
         line for line in text.splitlines() if re.search(r"train_stacks\.py --stacks", line)
     )
     assert "--probe-caches" in train_stacks_line_text
+
+
+def test_train_stacks_line_includes_causal_vjepa_window_sweep():
+    """Extends the GPU-box cache-warm to the causal V-JEPA-2 memory-horizon
+    sweep (CausalVJEPA2Encoder, models/pretrained.py): w16 (negative
+    control, window < occlusion) and w32 (fair test, window >= occlusion)
+    alongside the existing plain stacks -- fixes the non-causal-latency
+    confound (see artifacts/monitor_eval.md caveats). The bare
+    "vjepa2-vitl-causal" stack name no longer exists anywhere.
+    --probe-caches must be preserved."""
+    text = REMOTE_JOB.read_text(encoding="utf-8")
+    train_stacks_line_text = next(
+        line for line in text.splitlines() if re.search(r"train_stacks\.py --stacks", line)
+    )
+    assert (
+        "--stacks dinov2-s14,vjepa2-vitl,vjepa2-vitl-causal-w16,vjepa2-vitl-causal-w32"
+        in train_stacks_line_text
+    )
+    assert "--probe-caches" in train_stacks_line_text
+    # the bare (window-less) name must not survive as its own stack token
+    assert not re.search(r"vjepa2-vitl-causal(?![\w-])", train_stacks_line_text)
 
 
 def test_report_card_and_mechanistic_scripts_no_longer_invoked():

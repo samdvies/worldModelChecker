@@ -1,7 +1,8 @@
 """Builds the report card v1: for every law x {oracle, pixel-static,
 pixel-linear, raw-pixel, tiny-cnn-ae, tiny-cnn-pred}, runs behavioural VoE
-on the 16 eval pairs and writes artifacts/report_card.md +
-artifacts/voe_scores.json (per-pair obey/violate scores).
+on the eval pairs (n=64 by default) and writes artifacts/report_card.md +
+artifacts/voe_scores.json (per-pair obey/violate scores, plus a 95%
+percentile-bootstrap CI on each cell's AUROC).
 
 Also adds a delta_vs_pixel_floor column for the 3 learned encoder stacks,
 where pixel_floor(law) = max(auroc(pixel-static), auroc(pixel-linear)).
@@ -23,6 +24,7 @@ from physics_auditor.models.oracle import OracleAdapter
 from physics_auditor.models.predictor import load_predictor, load_predictor_meta
 from physics_auditor.models.pretrained import resolve_cache_only
 from physics_auditor.models.stacks import LatentStackAdapter
+from physics_auditor.probes.behavioural.metrics import bootstrap_auroc_ci
 from physics_auditor.probes.behavioural.pixel_baseline import PixelLinearAdapter, PixelStaticAdapter
 from physics_auditor.probes.behavioural.voe import run_voe
 from physics_auditor.report.card import ReportCard
@@ -39,9 +41,14 @@ PREDICTOR_WEIGHTS = {
     "tiny-cnn-pred": WEIGHTS_DIR / "predictor_tiny-cnn-pred.pt",
     "dinov2-s14": WEIGHTS_DIR / "predictor_dinov2-s14.pt",
     "vjepa2-vitl": WEIGHTS_DIR / "predictor_vjepa2-vitl.pt",
+    "vjepa2-vitl-causal-w16": WEIGHTS_DIR / "predictor_vjepa2-vitl-causal-w16.pt",
+    "vjepa2-vitl-causal-w32": WEIGHTS_DIR / "predictor_vjepa2-vitl-causal-w32.pt",
 }
 DEFAULT_STACKS = ["raw-pixel", "tiny-cnn-ae", "tiny-cnn-pred"]
-PRETRAINED_STACKS = ["dinov2-s14", "vjepa2-vitl"]
+# vjepa2-vitl-causal-w16/-w32 (memory-horizon sweep, see models/pretrained.py)
+# stay opt-in-only (never in DEFAULT_STACKS): encodes are ~16x the plain
+# stack's per-clip cost per window setting (48 windows vs 1 forward/clip).
+PRETRAINED_STACKS = ["dinov2-s14", "vjepa2-vitl", "vjepa2-vitl-causal-w16", "vjepa2-vitl-causal-w32"]
 ALL_STACK_NAMES = DEFAULT_STACKS + PRETRAINED_STACKS
 LATENT_STACKS = DEFAULT_STACKS  # default kept for backward-compat callers
 
@@ -62,6 +69,8 @@ def _load_encoder(name: str):
     if name == "dinov2-s14":
         return resolve_cache_only(name)
     if name == "vjepa2-vitl":
+        return resolve_cache_only(name)
+    if name in ("vjepa2-vitl-causal-w16", "vjepa2-vitl-causal-w32"):
         return resolve_cache_only(name)
     raise ValueError(f"unknown stack {name}")
 
@@ -126,17 +135,20 @@ def main() -> None:
 
             card.add_row(adapter.name, law_name, "behavioural", "auroc", result.auroc, result.n_pairs)
             auroc_by_model[adapter.name] = result.auroc
+            ci_lo, ci_hi = bootstrap_auroc_ci(result.obey_scores, result.violate_scores)
             law_scores[adapter.name] = {
                 "auroc": result.auroc,
+                "auroc_ci95": [ci_lo, ci_hi],
                 "obey_scores": result.obey_scores,
                 "violate_scores": result.violate_scores,
                 "distinct_scores": result.distinct_scores,
+                "n_pairs": result.n_pairs,
             }
             # A collapsed score distribution (e.g. a pixel-MSE baseline that
             # is translation-invariant along the only randomised dimension)
             # means the reported n_pairs massively overstates the effective
             # sample size behind this AUROC -- flag it loudly rather than
-            # let a "n=16" cell imply more statistical weight than it has.
+            # let a "n=n_pairs" cell imply more statistical weight than it has.
             if result.distinct_scores < result.n_pairs:
                 print(f"CAVEAT: {law_name}/{adapter.name} AUROC is based on only "
                       f"{result.distinct_scores} distinct score value(s) across "
@@ -155,32 +167,34 @@ def main() -> None:
                   f"-- validity gate failed, investigate upstream.")
 
     md_lines = [card.to_markdown(), "", "## delta_vs_pixel_floor (learned stacks only)", ""]
-    md_lines.append("| law | model | auroc | pixel_floor | delta_vs_pixel_floor |")
+    md_lines.append("| law | model | auroc [95% CI] | pixel_floor | delta_vs_pixel_floor |")
     md_lines.append("| --- | --- | --- | --- | --- |")
     for law_name in ALL_LAWS:
         pf = voe_scores[law_name]["pixel_floor"]
         for name in stacks:
             entry = voe_scores[law_name][name]
+            ci_lo, ci_hi = entry["auroc_ci95"]
             md_lines.append(
-                f"| {law_name} | {name} | {entry['auroc']:.3f} | {pf:.3f} | {entry['delta_vs_pixel_floor']:+.3f} |"
+                f"| {law_name} | {name} | {entry['auroc']:.3f} [{ci_lo:.2f}, {ci_hi:.2f}] | "
+                f"{pf:.3f} | {entry['delta_vs_pixel_floor']:+.3f} |"
             )
 
     all_model_names = [a.name for a in adapters]
     caveat_rows = [
-        (law_name, name, voe_scores[law_name][name]["distinct_scores"])
+        (law_name, name, voe_scores[law_name][name]["distinct_scores"], voe_scores[law_name][name]["n_pairs"])
         for law_name in ALL_LAWS
         for name in all_model_names
-        if voe_scores[law_name][name]["distinct_scores"] < 16
+        if voe_scores[law_name][name]["distinct_scores"] < voe_scores[law_name][name]["n_pairs"]
     ]
     md_lines += ["", "## Caveats: degenerate score distributions", "",
-                 "Cells below have fewer distinct score values than eval pairs (n=16) -- "
+                 "Cells below have fewer distinct score values than eval pairs -- "
                  "their effective sample size is smaller than n_pairs implies; treat their "
-                 "AUROC as a much weaker signal than a naive n=16 read would suggest.", ""]
+                 "AUROC as a much weaker signal than a naive n=n_pairs read would suggest.", ""]
     if caveat_rows:
-        md_lines.append("| law | model | distinct_scores (of 32 obey+violate) |")
+        md_lines.append("| law | model | distinct_scores (of 2*n_pairs obey+violate) |")
         md_lines.append("| --- | --- | --- |")
-        for law_name, name, distinct in caveat_rows:
-            md_lines.append(f"| {law_name} | {name} | {distinct} |")
+        for law_name, name, distinct, n_pairs in caveat_rows:
+            md_lines.append(f"| {law_name} | {name} | {distinct} (of {2 * n_pairs}) |")
     else:
         md_lines.append("(none)")
     markdown = "\n".join(md_lines)

@@ -17,8 +17,10 @@ part of "headline is confounded" (objection 2).
 Already being built: eval n=16 -> 64 with paired-bootstrap 95% CIs; `permanence-ext`
 (64-frame clips, re-emergence ~frame 30, >=25 frames of visible evidence) so per-frame
 stacks get a fair shot at permanence; `support-hard` (pixel-decoy tower collapsing in
-both clips) so the support row stops being pixel-trivial; `vjepa2-vitl-causal`
-(16-frame sliding-window encode, causally valid per-frame latents).
+both clips) so the support row stops being pixel-trivial; the
+`vjepa2-vitl-causal-w16`/`-w32` memory-horizon sweep (sliding-window encode,
+causally valid per-frame latents: w16 = window < occlusion, an intentional
+negative control; w32 = window >= occlusion, the fair test).
 
 **Gates:**
 - causal V-JEPA-2 permanence VoE >= 0.8 -> headline survives ("permanence sensitivity is

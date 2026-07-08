@@ -16,7 +16,7 @@
 # The box gets a public IP (needed for internet egress in the default VPC,
 # which has no NAT gateway), but isolation comes from a zero-inbound-rule
 # security group plus SSM-only access -- no open ingress ports. It
-# self-terminates via `remote_job.sh` (or the 240-minute cost backstop
+# self-terminates via `remote_job.sh` (or the 420-minute cost backstop
 # inside it) on completion or failure.
 set -euo pipefail
 

@@ -166,8 +166,8 @@ def main() -> None:
         },
         "caveats": [
             "Same honesty constraint as artifacts/report_card_v2.md: these are "
-            "n=16-eval-pair AUROCs (n_pairs shown per cell); degenerate cells "
-            "(distinct_scores < n_pairs) are flagged, not hidden.",
+            "eval-pair AUROCs (n_pairs shown per cell, n=64 by default); "
+            "degenerate cells (distinct_scores < n_pairs) are flagged, not hidden.",
             "The showcase pair per law (seed=0) is illustrative only -- it is "
             "outside the sacred probe-train (300..331) / probe-test (400..415) "
             "seed ranges and contributes to no reported metric.",

@@ -63,7 +63,8 @@ def test_probe_clips_fan_out_matches_4_laws_x_2_splits_x_pairs_x_2(monkeypatch):
     trained on the box) -- probe_clips() is the pure fan-out those scripts'
     cache-warming incidentally did, now the single source of truth for it.
     Real probe_pairs() is real pymunk generation (seeds 300..331/400..415,
-    384 clips) -- monkeypatched here with a tiny fake to stay fast."""
+    576 clips across all 6 ALL_LAWS) -- monkeypatched here with a tiny fake
+    to stay fast."""
     import scripts.train_stacks as train_stacks
 
     calls = []
@@ -81,13 +82,15 @@ def test_probe_clips_fan_out_matches_4_laws_x_2_splits_x_pairs_x_2(monkeypatch):
     assert len(clips) == n_laws * 2 * 3 * 2  # laws x splits x pairs x (obey, violate)
 
 
-def test_probe_clips_real_fan_out_is_384():
+def test_probe_clips_real_fan_out_is_576():
     """Not monkeypatched -- exercises real probe_pairs() (pymunk) to pin the
-    documented count: 4 laws x (32 train + 16 test) seeds x 2 clips = 384."""
+    documented count: 6 laws (ALL_LAWS, including the eval-only laws, which
+    need mechanistic probe latents too) x (32 train + 16 test) seeds x 2
+    clips = 576."""
     from scripts.train_stacks import probe_clips
 
     clips = probe_clips()
-    assert len(clips) == 384
+    assert len(clips) == 576
 
 
 def test_probe_caches_flag_routes_probe_clips_into_encode_clips_cached(monkeypatch, tmp_path):

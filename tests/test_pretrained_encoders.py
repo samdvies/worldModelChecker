@@ -11,6 +11,7 @@ import torch.nn as nn
 from physics_auditor.models.cache import encode_clip_cached
 from physics_auditor.models.pretrained import (
     CacheOnlyEncoder,
+    CausalVJEPA2Encoder,
     DINOv2Encoder,
     VJEPA2Encoder,
     _device_plan,
@@ -516,6 +517,36 @@ def test_resolve_cache_only_ignores_other_stacks(tmp_path):
     assert enc.cache_key == "dinov2-s14-f390cdf2"
 
 
+def test_resolve_cache_only_does_not_collide_with_longer_prefixed_stack_name(tmp_path):
+    """CausalVJEPA2Encoder's cache_key ("vjepa2-vitl-causal-w16-<hash>") also
+    matches the naive glob "vjepa2-vitl-*" used to resolve the plain
+    "vjepa2-vitl" stack -- once both dirs exist, resolving "vjepa2-vitl" must
+    NOT see this as an ambiguous 2-match state; only its own key-suffix shape
+    (8 hex chars, optionally "w<digits>-" prefixed) may match."""
+    (tmp_path / "vjepa2-vitl-aaaa1111").mkdir()
+    (tmp_path / "vjepa2-vitl-causal-w16-bbbb2222").mkdir()
+
+    enc = resolve_cache_only("vjepa2-vitl", cache_dir=str(tmp_path))
+    assert enc.cache_key == "vjepa2-vitl-aaaa1111"
+
+
+def test_resolve_cache_only_resolves_the_causal_w16_stack_itself(tmp_path):
+    (tmp_path / "vjepa2-vitl-aaaa1111").mkdir()
+    (tmp_path / "vjepa2-vitl-causal-w16-bbbb2222").mkdir()
+
+    enc = resolve_cache_only("vjepa2-vitl-causal-w16", cache_dir=str(tmp_path))
+    assert enc.cache_key == "vjepa2-vitl-causal-w16-bbbb2222"
+
+
+def test_resolve_cache_only_resolves_the_causal_w32_stack_itself_and_not_w16(tmp_path):
+    (tmp_path / "vjepa2-vitl-aaaa1111").mkdir()
+    (tmp_path / "vjepa2-vitl-causal-w16-bbbb2222").mkdir()
+    (tmp_path / "vjepa2-vitl-causal-w32-cccc3333").mkdir()
+
+    enc = resolve_cache_only("vjepa2-vitl-causal-w32", cache_dir=str(tmp_path))
+    assert enc.cache_key == "vjepa2-vitl-causal-w32-cccc3333"
+
+
 def test_device_plan_cpu_when_cuda_unavailable(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     device, use_half, default_batch = _device_plan(default_cpu_batch=1, default_cuda_batch=4)
@@ -526,6 +557,196 @@ def test_device_plan_cuda_fp16_when_cuda_available(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     device, use_half, default_batch = _device_plan(default_cpu_batch=1, default_cuda_batch=4)
     assert (device, use_half, default_batch) == ("cuda", True, 4)
+
+
+# ------------------------------------------------------ CausalVJEPA2Encoder
+
+def test_causal_vjepa2_name():
+    """Default window is 16; `.name` bakes the window into the registered
+    stack name (predictor-weights pairing and report columns key on
+    `.name`)."""
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched())
+    assert enc.name == "vjepa2-vitl-causal-w16"
+
+
+def test_causal_vjepa2_name_w32():
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched(), window=32)
+    assert enc.name == "vjepa2-vitl-causal-w32"
+    assert enc.window == 32
+
+
+def test_causal_vjepa2_build_windows_left_pads_early_frames():
+    """t=0..2 (< WINDOW-1): window must be exactly WINDOW=16 frames long,
+    left-padded with frame 0 repeated, followed by the real content
+    frames[0..t]."""
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched())
+    clip = _fake_clip(t=6, seed=1)
+    windows = enc._build_windows(clip.frames)
+    assert windows.shape == (6, 16, 64, 64, 3)
+
+    w0 = windows[0]
+    np.testing.assert_array_equal(w0[:15], np.repeat(clip.frames[0:1], 15, axis=0))
+    np.testing.assert_array_equal(w0[15], clip.frames[0])
+
+    w2 = windows[2]
+    np.testing.assert_array_equal(w2[:13], np.repeat(clip.frames[0:1], 13, axis=0))
+    np.testing.assert_array_equal(w2[13:16], clip.frames[0:3])
+
+
+def test_causal_vjepa2_build_windows_mid_clip_no_padding_needed():
+    """t >= window-1: window is exactly frames[t-15..t], no padding."""
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched())
+    clip = _fake_clip(t=20, seed=2)
+    windows = enc._build_windows(clip.frames)
+
+    w15 = windows[15]
+    np.testing.assert_array_equal(w15, clip.frames[0:16])
+
+    w19 = windows[19]
+    np.testing.assert_array_equal(w19, clip.frames[4:20])
+
+
+def test_causal_vjepa2_w32_build_windows_covers_31_frames_back():
+    """window=32: window at frame t covers frames t-31..t inclusive (32
+    frames total), the fair memory-horizon test (>= the ~20-26 frame
+    permanence occlusion length)."""
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched(), window=32)
+    clip = _fake_clip(t=40, seed=5)
+    windows = enc._build_windows(clip.frames)
+
+    assert windows.shape == (40, 32, 64, 64, 3)
+    w31 = windows[31]
+    np.testing.assert_array_equal(w31, clip.frames[0:32])
+
+    w39 = windows[39]
+    np.testing.assert_array_equal(w39, clip.frames[8:40])
+
+
+def test_causal_vjepa2_encode_shape_and_dtype():
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched(hidden_dim=1024, num_spatial=4))
+    clip = _fake_clip(t=8, seed=3)
+    z = enc.encode(clip)
+    assert z.shape == (8, 1024)
+    assert z.dtype == np.float32
+
+
+def test_causal_vjepa2_causality_future_frame_perturbation_does_not_change_past_latents():
+    """THE property: perturbing frame t+1 of a clip must not change any
+    latent at frame index <= t, because that latent's window never contains
+    frame t+1 (see _build_windows: window for i only ever spans
+    frames[max(0,i-15)..i])."""
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched(hidden_dim=8, num_spatial=2))
+    clip = _fake_clip(t=8, seed=4)
+    t = 3  # perturb frame t+1=4; frames 0..3 must be unaffected
+
+    z_before = enc.encode(clip)
+
+    perturbed = _fake_clip(t=8, seed=4)
+    perturbed.frames[t + 1] = 255 - perturbed.frames[t + 1]  # invert pixel values
+    z_after = enc.encode(perturbed)
+
+    np.testing.assert_array_equal(z_before[: t + 1], z_after[: t + 1])
+    # sanity: the perturbation DOES change something at/after the perturbed frame
+    assert not np.allclose(z_before[t + 1 :], z_after[t + 1 :])
+
+
+def test_causal_vjepa2_cache_key_format():
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched())
+    assert enc.cache_key.startswith("vjepa2-vitl-causal-w16-")
+    assert len(enc.cache_key) == len("vjepa2-vitl-causal-w16-") + 8
+
+
+def test_causal_vjepa2_cache_key_deterministic_same_weights():
+    enc1 = CausalVJEPA2Encoder(model=_mock_vjepa_batched(seed=9))
+    enc2 = CausalVJEPA2Encoder(model=_mock_vjepa_batched(seed=9))
+    assert enc1.cache_key == enc2.cache_key
+
+
+def test_causal_vjepa2_cache_key_sensitive_to_weights():
+    enc1 = CausalVJEPA2Encoder(model=_mock_vjepa_batched(seed=9))
+    enc2 = CausalVJEPA2Encoder(model=_mock_vjepa_batched(seed=10))
+    assert enc1.cache_key != enc2.cache_key
+
+
+def test_causal_vjepa2_requires_model_before_use():
+    enc = CausalVJEPA2Encoder()
+    try:
+        enc.encode(_fake_clip())
+        assert False, "expected RuntimeError"
+    except RuntimeError:
+        pass
+    try:
+        _ = enc.cache_key
+        assert False, "expected RuntimeError"
+    except RuntimeError:
+        pass
+
+
+def test_causal_vjepa2_encode_clip_cached_round_trip(tmp_path):
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched())
+    clip = _fake_clip(t=5, seed=6)
+    z1 = encode_clip_cached(enc, clip, cache_dir=str(tmp_path))
+    expected = tmp_path / enc.cache_key / "deadbeef.npy"
+    assert expected.exists()
+    z2 = encode_clip_cached(enc, clip, cache_dir=str(tmp_path))
+    np.testing.assert_array_equal(z1, z2)
+
+
+def test_causal_vjepa2_encode_batch_matches_unbatched_encode():
+    """encode_batch across MULTIPLE clips (packed into the batch dimension,
+    per the pinned design) must reproduce per-clip encode() output."""
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched(seed=11))
+    clips = [_fake_clip(t=6, seed=i) for i in range(5)]
+
+    unbatched = [enc.encode(c) for c in clips]
+    batched = enc.encode_batch(clips, batch_size=3)  # forces >1 chunk (5 clips / 3)
+
+    assert len(batched) == len(clips)
+    for z_unbatched, z_batched in zip(unbatched, batched):
+        assert z_batched.shape == z_unbatched.shape
+        assert z_batched.dtype == np.float32
+        np.testing.assert_allclose(z_batched, z_unbatched, rtol=1e-4, atol=1e-5)
+
+
+def test_causal_vjepa2_encode_batch_packs_windows_across_clips():
+    """Different-length clips (unlike plain VJEPA2Encoder, which needs
+    same-T chunks) can still all be batched together, since every window is
+    exactly WINDOW=16 frames regardless of the owning clip's T."""
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched(seed=12))
+    clips = [_fake_clip(t=4, seed=0), _fake_clip(t=9, seed=1), _fake_clip(t=6, seed=2)]
+    out = enc.encode_batch(clips, batch_size=5)
+    assert [z.shape[0] for z in out] == [4, 9, 6]
+    for z, c in zip(out, clips):
+        expected = enc.encode(c)
+        np.testing.assert_allclose(z, expected, rtol=1e-4, atol=1e-5)
+
+
+def test_causal_vjepa2_default_batch_sizes():
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched())
+    device, use_half, default_batch = _device_plan(
+        default_cpu_batch=enc.DEFAULT_CPU_BATCH_SIZE,
+        default_cuda_batch=enc.DEFAULT_CUDA_BATCH_SIZE,
+    )
+    assert device == "cpu"
+    assert use_half is False
+    assert default_batch == 1
+    assert enc.DEFAULT_CUDA_BATCH_SIZE == 8
+
+
+def test_causal_vjepa2_fp16_cpu_equivalent_path_casts_back_to_float32():
+    enc = CausalVJEPA2Encoder(model=_mock_vjepa_batched())
+    clip = _fake_clip(t=6, seed=13)
+
+    z_full = enc._encode_core(clip, device="cpu", use_half=False, batch_size=4)
+    z_half = enc._encode_core(clip, device="cpu", use_half=True, batch_size=4)
+
+    assert z_half.dtype == np.float32
+    assert z_full.dtype == np.float32
+    np.testing.assert_allclose(z_half, z_full, rtol=1e-2, atol=1e-2)
+
+
+def test_causal_vjepa2_load_uses_same_hf_model_id_as_plain_stack():
+    assert CausalVJEPA2Encoder.HF_MODEL_ID == VJEPA2Encoder.HF_MODEL_ID
 
 
 def test_vjepa2_uses_run_backbone_hook_for_api_isolation():

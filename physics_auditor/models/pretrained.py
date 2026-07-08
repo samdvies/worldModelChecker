@@ -28,6 +28,7 @@ import glob
 import hashlib
 import io
 import os
+import re
 
 import numpy as np
 import torch
@@ -292,6 +293,219 @@ class VJEPA2Encoder:
         return self._encode_core_batch(clips, device=device, use_half=use_half, batch_size=batch_size)
 
 
+class CausalVJEPA2Encoder:
+    """Causal counterpart of VJEPA2Encoder (same backbone/weights), fixing
+    the non-causal-latency confound: VJEPA2Encoder encodes the WHOLE clip
+    with bidirectional temporal attention, so a frame's latent leaks
+    information from LATER frames too (see docs/gallery caveats and
+    artifacts/monitor_eval.md). Here, the latent for frame t is produced by
+    encoding ONLY a fixed `window`-frame window ending at t (frames
+    max(0,t-window+1)..t, left-padded by repeating frame 0 when t<window-1
+    so every window is exactly `window` frames), then taking the LAST
+    temporal token's spatial-mean -- the same per-frame latent recipe
+    VJEPA2Encoder uses, applied to the window's final temporal slot only.
+    The latent at frame t therefore depends only on frames <= t: causally
+    valid by construction.
+
+    Windows are all the same length (`window`), so unlike VJEPA2Encoder's
+    encode_batch (which requires clips within a chunk to share T),
+    `encode`/`encode_batch` here can pack windows from the SAME clip, and
+    (in encode_batch) windows from DIFFERENT clips, into one batch forward.
+
+    Memory-horizon sweep (design amendment): the ball is occluded for
+    roughly 20-26 frames in the permanence scenarios, so a fixed WINDOW=16
+    encoder can never carry the memory across an occlusion by construction
+    -- at re-emergence its window contains only occluder frames, regardless
+    of the encoder's capability. Rather than a single pinned window, this
+    class takes a `window` constructor param and is registered under two
+    stack names:
+      - vjepa2-vitl-causal-w16 (window=16): memory window SHORTER than the
+        occlusion length. An intentional NEGATIVE CONTROL -- a predicted
+        structural null result on causal permanence, not a capability
+        finding.
+      - vjepa2-vitl-causal-w32 (window=32): memory window >= the occlusion
+        length. The fair test, where the encoder actually has a chance to
+        carry the memory.
+    `.name` is set from `window` at construction time and equals the
+    registered stack name the instance was built under (predictor-weights
+    pairing and report columns key on `.name`)."""
+
+    BASE_NAME = "vjepa2-vitl-causal"
+    INPUT_SIZE = 256
+    TUBELET_SIZE = 2
+    DEFAULT_WINDOW = 16
+    HF_MODEL_ID = VJEPA2Encoder.HF_MODEL_ID
+    DEFAULT_CPU_BATCH_SIZE = 1
+    DEFAULT_CUDA_BATCH_SIZE = 8
+
+    def __init__(self, model: nn.Module | None = None, window: int = DEFAULT_WINDOW):
+        self.model = model
+        self.window = window
+        self.name = f"{self.BASE_NAME}-w{window}"
+
+    def load(self) -> "CausalVJEPA2Encoder":
+        """Identical to VJEPA2Encoder.load: same HF model id, same fp16-on-
+        cuda cast -- this is the SAME pretrained backbone, just windowed
+        differently at encode time."""
+        from transformers import AutoModel  # gpu-group-only import
+
+        self.model = AutoModel.from_pretrained(self.HF_MODEL_ID)
+        self.model.eval()
+        if torch.cuda.is_available():
+            self.model = self.model.half().to("cuda")
+        return self
+
+    def _require_model(self) -> nn.Module:
+        if self.model is None:
+            raise RuntimeError(
+                f"{self.name}: no model loaded -- call .load() (GPU box) or "
+                f"construct with model=<mock> (tests) first"
+            )
+        return self.model
+
+    @property
+    def cache_key(self) -> str:
+        # `self.name` already carries the window (e.g. "vjepa2-vitl-causal-
+        # w32"), so no separate "w<n>-" piece is bolted on here -- a
+        # differently-windowed instance already produces a different name
+        # and therefore a different cache_key, never silently mixed with
+        # another window's cache.
+        return f"{self.name}-{_state_dict_hash(self._require_model())}"
+
+    def _build_windows(self, frames: np.ndarray) -> np.ndarray:
+        """frames: (T, 64, 64, 3) -> (T, window, 64, 64, 3): window i =
+        frames[max(0,i-window+1)..i], left-padded with frame 0 repeated so
+        every window is exactly `window` frames long."""
+        t = frames.shape[0]
+        w = self.window
+        windows = np.empty((t, w) + frames.shape[1:], dtype=frames.dtype)
+        for i in range(t):
+            start = max(0, i - w + 1)
+            content = frames[start : i + 1]
+            pad_n = w - content.shape[0]
+            if pad_n > 0:
+                pad = np.repeat(frames[0:1], pad_n, axis=0)
+                windows[i] = np.concatenate([pad, content], axis=0)
+            else:
+                windows[i] = content
+        return windows
+
+    def _run_backbone_batch(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """Same isolation point as VJEPA2Encoder._run_backbone_batch:
+        pixel_values (B, WINDOW, 3, 256, 256) -> (B, num_temporal,
+        num_spatial, hidden_dim)."""
+        with torch.no_grad():
+            out = self.model(pixel_values_videos=pixel_values)
+        hidden = out.last_hidden_state
+        b, n_tokens, hidden_dim = hidden.shape
+        num_temporal = max(pixel_values.shape[1] // self.TUBELET_SIZE, 1)
+        num_spatial = n_tokens // num_temporal
+        assert n_tokens % num_temporal == 0, (
+            f"hidden tokens {n_tokens} not evenly divisible by num_temporal {num_temporal}"
+        )
+        return hidden[:, : num_temporal * num_spatial].reshape(b, num_temporal, num_spatial, hidden_dim)
+
+    def _encode_core(self, clip: Clip, device: str, use_half: bool, batch_size: int) -> np.ndarray:
+        """Device-agnostic encode core: builds every per-frame window for
+        this clip, then runs them through the backbone `batch_size` windows
+        at a time (all windows share the same length, so any grouping is a
+        real batched forward)."""
+        model = self._require_model()
+        model.eval()
+        model.to(device)
+
+        frames = clip.frames
+        t = frames.shape[0]
+        windows = self._build_windows(frames)  # (T, WINDOW, 64, 64, 3)
+        xs = [_resize_and_normalize(windows[i], self.INPUT_SIZE) for i in range(t)]  # each (WINDOW,3,256,256)
+
+        outputs: list[np.ndarray] = [None] * t  # type: ignore[list-item]
+        i = 0
+        while i < t:
+            j = min(i + batch_size, t)
+            x = torch.stack(xs[i:j], dim=0).to(device)  # (b, WINDOW, 3, 256, 256)
+            if use_half:
+                model.half()
+                x = x.half()
+
+            backbone_out = self._run_backbone_batch(x)  # (b, num_temporal, num_spatial, hidden)
+            last_temporal = backbone_out[:, -1, :, :]  # (b, num_spatial, hidden) -- final temporal slot
+            per_window = last_temporal.mean(dim=1)  # (b, hidden)
+
+            for offset in range(j - i):
+                outputs[i + offset] = per_window[offset].detach().float().cpu().numpy().astype(np.float32)
+            i = j
+
+        return np.stack(outputs, axis=0)
+
+    def encode(self, clip: Clip) -> np.ndarray:
+        device, use_half, default_batch = _device_plan(
+            default_cpu_batch=self.DEFAULT_CPU_BATCH_SIZE,
+            default_cuda_batch=self.DEFAULT_CUDA_BATCH_SIZE,
+        )
+        return self._encode_core(clip, device=device, use_half=use_half, batch_size=default_batch)
+
+    def _encode_core_batch(
+        self, clips: list[Clip], device: str, use_half: bool, batch_size: int
+    ) -> list[np.ndarray]:
+        """Device-agnostic multi-clip batched encode core: every window
+        across EVERY clip is flattened into one list (windows are always
+        WINDOW frames regardless of the owning clip's T, so unlike
+        VJEPA2Encoder there is no same-T grouping constraint), chunked into
+        groups of at most `batch_size`, run through the backbone, then
+        scattered back into per-clip (T, hidden) arrays."""
+        model = self._require_model()
+        model.eval()
+        model.to(device)
+
+        flat_windows: list[torch.Tensor] = []
+        clip_lengths: list[int] = []
+        for c in clips:
+            frames = c.frames
+            t = frames.shape[0]
+            clip_lengths.append(t)
+            windows = self._build_windows(frames)
+            flat_windows.extend(_resize_and_normalize(windows[i], self.INPUT_SIZE) for i in range(t))
+
+        n = len(flat_windows)
+        flat_outputs: list[np.ndarray] = [None] * n  # type: ignore[list-item]
+        i = 0
+        while i < n:
+            j = min(i + batch_size, n)
+            x = torch.stack(flat_windows[i:j], dim=0).to(device)
+            if use_half:
+                model.half()
+                x = x.half()
+
+            backbone_out = self._run_backbone_batch(x)
+            last_temporal = backbone_out[:, -1, :, :]
+            per_window = last_temporal.mean(dim=1)
+
+            for offset in range(j - i):
+                flat_outputs[i + offset] = per_window[offset].detach().float().cpu().numpy().astype(np.float32)
+            i = j
+
+        results: list[np.ndarray] = []
+        idx = 0
+        for t in clip_lengths:
+            results.append(np.stack(flat_outputs[idx : idx + t], axis=0))
+            idx += t
+        return results
+
+    def encode_batch(self, clips: list[Clip], batch_size: int | None = None) -> list[np.ndarray]:
+        """Encode multiple clips, packing `batch_size` WINDOWS (not clips --
+        see class docstring) per forward (default 8 on cuda, 1 on cpu).
+        Returns a list of per-clip (T, 1024) float32 latents, identical
+        (within fp tolerance) to calling `encode` on each clip individually."""
+        device, use_half, default_batch = _device_plan(
+            default_cpu_batch=self.DEFAULT_CPU_BATCH_SIZE,
+            default_cuda_batch=self.DEFAULT_CUDA_BATCH_SIZE,
+        )
+        if batch_size is None:
+            batch_size = default_batch
+        return self._encode_core_batch(clips, device=device, use_half=use_half, batch_size=batch_size)
+
+
 class CacheOnlyEncoder:
     """Stand-in for a pretrained encoder whose weights only ever load on the
     GPU box (see module docstring): carries just the `name`/`cache_key` a
@@ -316,15 +530,40 @@ class CacheOnlyEncoder:
         )
 
 
+# The exact key-suffix shape every encoder in this module actually produces
+# after "{name}-": a bare 8-char hex state-dict hash (e.g. "f390cdf2").
+# CausalVJEPA2Encoder's window is baked into `.name` itself (e.g.
+# "vjepa2-vitl-causal-w32"), not bolted on as a separate suffix, so its
+# cache_key has this exact same bare-hash shape too. Anything else means the
+# candidate dir belongs to a DIFFERENT, longer registered stack name that
+# merely starts with "{name}-" (e.g. "vjepa2-vitl-causal-w16-..." naively
+# glob-matching a resolve for "vjepa2-vitl") -- not a real match. The
+# leading "(w\d+-)?" is kept for backward compatibility with any
+# differently-windowed encoder shape added in the future that still bolts
+# a window suffix on separately, rather than baking it into `.name`.
+_CACHE_KEY_SUFFIX_RE = re.compile(r"^(w\d+-)?[0-9a-f]{8}$")
+
+
 def resolve_cache_only(name: str, cache_dir: str = "cache") -> CacheOnlyEncoder:
     """Resolves a stack `name` to the single populated cache dir under
     `{cache_dir}/{name}-*` and returns a CacheOnlyEncoder pinned to that
     cache_key. Loud RuntimeError on zero or 2+ matches -- an ambiguous or
     absent cache must never be silently guessed at (see module docstring:
     stale partial dirs from a prior run may coexist with the current one
-    until a separate prune process removes them)."""
+    until a separate prune process removes them).
+
+    The naive glob `{name}-*` also matches a LONGER registered stack name's
+    cache dirs whenever one name is a hyphenated prefix of another (e.g.
+    "vjepa2-vitl-causal-w16-<hash>" matching a resolve for "vjepa2-vitl") --
+    filtered out below by requiring the remainder after "{name}-" to match
+    the actual key-suffix shape this module's encoders produce, not just any
+    string starting with the right characters."""
     matches = sorted(glob.glob(os.path.join(cache_dir, f"{name}-*")))
     matches = [m for m in matches if os.path.isdir(m)]
+    matches = [
+        m for m in matches
+        if _CACHE_KEY_SUFFIX_RE.match(os.path.basename(m)[len(name) + 1 :])
+    ]
     if not matches:
         raise RuntimeError(
             f"no cache dir for stack {name!r} under {cache_dir!r} -- run the "
